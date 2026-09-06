@@ -15,6 +15,7 @@ add_executable(forgedb
     	src/storage/KeyValueStore.cpp
 		src/commands/CommandParser.cpp
 		src/commands/CommandHandler.cpp
+		src/storage/WAL.cpp
 )
 
 target_include_directories(forgedb

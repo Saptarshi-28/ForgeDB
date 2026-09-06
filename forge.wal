@@ -1,0 +1,4 @@
+SET name Saptarshi
+SET city Delhi
+DELETE name
+SET age 22

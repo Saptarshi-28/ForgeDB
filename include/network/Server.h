@@ -10,7 +10,7 @@ namespace forgedb::network {
 
 		private:
     			static constexpr int PORT=6379;
-				forgedb::storage::KeyValueStore store_;
+				forgedb::storage::KeyValueStore store_{"forge.wal"};
 				forgedb::commands::CommandHandler commandHandler_{store_};
 	};
 }

@@ -2,11 +2,15 @@
 
 #include <string>
 #include <unordered_map>
+#include "storage/WAL.h"
 
 namespace forgedb::storage {
 
 	class KeyValueStore {
+
 		public:
+				KeyValueStore(const std::string& wal_filename);
+				
     			void set(const std::string& key, const std::string& value);
 
     			std::string get(const std::string& key);
@@ -15,6 +19,8 @@ namespace forgedb::storage {
 
 		private:
     			std::unordered_map<std::string, std::string> data_;
+				WAL wal_;
+				void applyOperation(const std::string& operation);
 	};
 
 }
