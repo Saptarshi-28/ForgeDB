@@ -1,17 +1,16 @@
+#include "commands/CommandParser.h"
 #include "network/Server.h"
 #include <arpa/inet.h>
 #include <cstring>
-#include <iostream>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <iostream>
-#include <sstream>
-#include <string>
 
 namespace forgedb::network {
 
 void Server::start() {
+
 	//CREATE SCOKET
     	int server_fd=socket(AF_INET,SOCK_STREAM,0);
 
@@ -44,6 +43,7 @@ void Server::start() {
 	}
 	std::cout<<"ForgeDB server LISTENING on port "<<PORT<<std::endl;
 
+	forgedb::commands::CommandParser parser;
 	//ACCEPT CLIENTS
 	while(true){
 		sockaddr_in client_address{};
@@ -61,7 +61,8 @@ void Server::start() {
 			return;
 		}
 		std::cout<<"Client connected!"<<std::endl;
-
+		
+		std::string receive_buffer;
 		//RECIEVE
 		while(true){
 			char buffer[1024];
@@ -74,59 +75,48 @@ void Server::start() {
 				break;
 			}
 			buffer[bytes_recieved]='\0';
+			receive_buffer+=buffer;
+			
+			//PARSING COUPLED COMMANDS
+			size_t newline_pos;
+			while((newline_pos=receive_buffer.find('\n'))!=std::string::npos){
+			
+				std::string command=receive_buffer.substr(0,newline_pos);
+				receive_buffer.erase(0,newline_pos+1);
+				auto parsed = parser.parse(command);
+			
+				if (parsed.type == forgedb::commands::CommandType::SET) {
 
-			std::string command(buffer);
+ 					store_.set(parsed.key, parsed.value);
 
-			std::istringstream stream(command);
+    					const char* response = "OK\n";
 
-			std::string operation;
-			std::string key;
-			std::string value;
+    					send(client_fd,response,std::strlen(response),0);
+				}
+				else if (parsed.type == forgedb::commands::CommandType::GET) {
 
-			stream >> operation;
+    					std::string result = store_.get(parsed.key);
 
-			if (operation == "SET") {
+    					if (result.empty()) result = "(nil)\n";
+    					else result += "\n";
 
-    				stream >> key;
-    				stream >> value;
+    					send(client_fd,result.c_str(),result.size(),0);
+				}
+				else if (parsed.type == forgedb::commands::CommandType::DELETE) {
 
-    				store_.set(key, value);
+    					bool removed = store_.remove(parsed.key);
 
-    				const char* response = "OK\n";
+    					const char* response = removed ? "OK\n" : "(nil)\n";
 
-    				send(client_fd,response,std::strlen(response),0);
+    					send(client_fd,response,std::strlen(response),0);
+				}
+				else {
 
+    					const char* response = "ERR unknown command\n";
+
+    					send(client_fd,response,std::strlen(response),0);
+				}
 			}
-			else if (operation == "GET") {
-
-    				stream >> key;
-
-    				std::string result = store_.get(key);
-
-    				if (result.empty()) result = "(nil)\n";
-				else result += "\n";
-
-    				send(client_fd,result.c_str(),result.size(),0);
-
-			}
-			else if (operation == "DELETE") {
-
-    				stream >> key;
-
-    				bool removed = store_.remove(key);
-
-    				const char* response = removed ? "OK\n" : "(nil)\n";
-
-    				send(client_fd,response,std::strlen(response),0);
-
-			}
-			else {
-
-    				const char* response = "ERR unknown command\n";
-
-    				send(client_fd,response,std::strlen(response),0);
-			}
-
 		}
 		//CLOSE
 		close(client_fd);

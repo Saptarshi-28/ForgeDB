@@ -1,24 +1,11 @@
 #include "commands/CommandParser.h"
-
+#include "network/Server.h"
 #include <iostream>
 
 int main() {
 
-    forgedb::commands::CommandParser parser;
-
-    auto command = parser.parse("SET name Saptarshi");
-
-    std::cout << "Command type: "
-              << static_cast<int>(command.type)
-              << std::endl;
-
-    std::cout << "Key: "
-              << command.key
-              << std::endl;
-
-    std::cout << "Value: "
-              << command.value
-              << std::endl;
+    forgedb::network::Server server;
+    server.start();
 
     return 0;
 }
