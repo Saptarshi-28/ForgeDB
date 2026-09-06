@@ -1,7 +1,6 @@
 #include "commands/CommandParser.h"
 #include "network/Server.h"
 #include <arpa/inet.h>
-#include <cstring>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -83,39 +82,10 @@ void Server::start() {
 			
 				std::string command=receive_buffer.substr(0,newline_pos);
 				receive_buffer.erase(0,newline_pos+1);
+				
 				auto parsed = parser.parse(command);
-			
-				if (parsed.type == forgedb::commands::CommandType::SET) {
-
- 					store_.set(parsed.key, parsed.value);
-
-    					const char* response = "OK\n";
-
-    					send(client_fd,response,std::strlen(response),0);
-				}
-				else if (parsed.type == forgedb::commands::CommandType::GET) {
-
-    					std::string result = store_.get(parsed.key);
-
-    					if (result.empty()) result = "(nil)\n";
-    					else result += "\n";
-
-    					send(client_fd,result.c_str(),result.size(),0);
-				}
-				else if (parsed.type == forgedb::commands::CommandType::DELETE) {
-
-    					bool removed = store_.remove(parsed.key);
-
-    					const char* response = removed ? "OK\n" : "(nil)\n";
-
-    					send(client_fd,response,std::strlen(response),0);
-				}
-				else {
-
-    					const char* response = "ERR unknown command\n";
-
-    					send(client_fd,response,std::strlen(response),0);
-				}
+				std::string response = commandHandler_.execute(parsed);
+				send(client_fd,response.c_str(),response.size(),0);
 			}
 		}
 		//CLOSE

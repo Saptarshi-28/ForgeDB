@@ -1,5 +1,6 @@
 #pragma once
 #include "storage/KeyValueStore.h"
+#include "commands/CommandHandler.h"
 
 namespace forgedb::network {
 
@@ -9,6 +10,7 @@ namespace forgedb::network {
 
 		private:
     			static constexpr int PORT=6379;
-			forgedb::storage::KeyValueStore store_;
+				forgedb::storage::KeyValueStore store_;
+				forgedb::commands::CommandHandler commandHandler_{store_};
 	};
 }
