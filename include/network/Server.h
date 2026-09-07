@@ -6,11 +6,14 @@ namespace forgedb::network {
 
 	class Server {
 		public:
-    			void start();
+    		void start();
 
 		private:
-    			static constexpr int PORT=6379;
-				forgedb::storage::KeyValueStore store_{"forge.wal"};
-				forgedb::commands::CommandHandler commandHandler_{store_};
+    		static constexpr int PORT=6379;
+				
+			void handleClient(int client_fd);
+
+			forgedb::storage::KeyValueStore store_{"forge.wal"};
+			forgedb::commands::CommandHandler commandHandler_{store_};
 	};
 }

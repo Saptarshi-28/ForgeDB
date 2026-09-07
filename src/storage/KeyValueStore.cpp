@@ -1,5 +1,7 @@
 #include "storage/KeyValueStore.h"
 #include <sstream>
+#include <shared_mutex>
+#include <mutex>
 
 namespace forgedb::storage {
 
@@ -35,17 +37,20 @@ namespace forgedb::storage {
 	}
 
 	void KeyValueStore::set(const std::string& key,const std::string& value){
+		std::unique_lock<std::shared_mutex> lock(mutex_);
     	wal_.append("SET " + key + " " + value);
 		data_[key] = value;
 	}
 
 	std::string KeyValueStore::get(const std::string& key) {
+		std::shared_lock<std::shared_mutex> lock(mutex_);
     	auto it = data_.find(key);
     	if (it == data_.end()) return "";
 		return it->second;
 	}
 
 	bool KeyValueStore::remove(const std::string& key){
+		std::unique_lock<std::shared_mutex> lock(mutex_);
 		bool removed = data_.erase(key) > 0;
     	if (removed) wal_.append("DELETE " + key);
     	return removed;
