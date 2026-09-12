@@ -1,9 +1,0 @@
-SET name Saptarshi
-SET city Delhi
-DELETE name
-SET age 22
-SET name Saptarshi
-DELETE name
-SET name SaptarshiPandit
-SET counter 100
-SET counter 200
