@@ -79,23 +79,6 @@ namespace forgedb::network {
 
         while (true) {
 
-            //sockaddr_in client_address{};
-            //socklen_t client_address_length = sizeof(client_address);
-            //int client_fd = accept(
-            //    server_fd,
-            //    reinterpret_cast<sockaddr*>(&client_address),
-            //    &client_address_length
-            //);
-            //if (client_fd < 0) {
-            //    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            //        continue;
-            //    }
-            //    std::cerr << "Failed to accept client" << std::endl;
-            //    continue;
-            //}
-            //std::cout << "Client connected!" << std::endl;
-    		//std::thread client_thread(&Server::handleClient, this, client_fd);
-    		//client_thread.detach();
             int event_count = epoll_wait(epoll_fd,events,10,-1);
 
             if (event_count < 0) {
@@ -161,7 +144,7 @@ namespace forgedb::network {
                                 
                                 receive_buffers[client_fd].erase(0,newline_pos + 1);
                             
-                                processCommand(client_fd, command);
+                                threadPool_.submit([this, client_fd, command]() {processCommand(client_fd, command);});
                             }
                         }
                         else if (bytes_received == 0) {
@@ -231,7 +214,7 @@ namespace forgedb::network {
                     newline_pos + 1
                 );
 
-                processCommand(client_fd, command);
+                threadPool_.submit([this, client_fd, command]() {processCommand(client_fd, command);});
             }
         }
 

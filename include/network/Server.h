@@ -2,6 +2,7 @@
 #include "storage/KeyValueStore.h"
 #include "commands/CommandHandler.h"
 #include <string>
+#include "concurrency/ThreadPool.h"
 
 namespace forgedb::network {
 
@@ -17,5 +18,6 @@ namespace forgedb::network {
 
 			forgedb::storage::KeyValueStore store_{"forge.wal"};
 			forgedb::commands::CommandHandler commandHandler_{store_};
+			forgedb::concurrency::ThreadPool threadPool_{4};
 	};
 }
