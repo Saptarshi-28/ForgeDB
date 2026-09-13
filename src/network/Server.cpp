@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <sys/epoll.h>
 
+#include <cstring>
+
 namespace forgedb::network {
 
     void Server::start()
@@ -104,60 +106,89 @@ namespace forgedb::network {
             for (int i = 0; i < event_count; ++i) {
                 if (events[i].data.fd == server_fd) {
 
-                    sockaddr_in client_address{};
-                    socklen_t client_address_length = sizeof(client_address);
+                    while(true){
+                        sockaddr_in client_address{};
+                        socklen_t client_address_length = sizeof(client_address);
 
-                    int client_fd = accept(server_fd,reinterpret_cast<sockaddr*>(&client_address),&client_address_length);
-                
-                    if (client_fd < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-                        std::cerr << "Failed to accept client" << std::endl;
-                        continue;
-                    }
-                
-                    std::cout << "Client connected!" << std::endl;
+                        int client_fd = accept(server_fd,reinterpret_cast<sockaddr*>(&client_address),&client_address_length);
+                    
+                        if (client_fd < 0) {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                            std::cerr << "Failed to accept client" << std::endl;
+                            break;
+                        }
+                    
+                        std::cout << "Client connected!" << std::endl;
 
-                    int client_flags = fcntl(client_fd, F_GETFL, 0);
+                        int client_flags = fcntl(client_fd, F_GETFL, 0);
 
-                    if (client_flags < 0 || fcntl(client_fd, F_SETFL, client_flags | O_NONBLOCK) < 0) {
-                        std::cerr << "Failed to set client socket to non-blocking" << std::endl;
-                        close(client_fd);
-                        continue;
-                    }
-                    
-                    epoll_event client_event{};
-                    
-                    client_event.events = EPOLLIN;
-                    client_event.data.fd = client_fd;
-                    
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event) < 0) {
-                        std::cerr << "Failed to add client socket to epoll" << std::endl;
-                        close(client_fd);
-                        continue;
+                        if (client_flags < 0 || fcntl(client_fd, F_SETFL, client_flags | O_NONBLOCK) < 0) {
+                            std::cerr << "Failed to set client socket to non-blocking" << std::endl;
+                            close(client_fd);
+                            continue;
+                        }
+
+                        epoll_event client_event{};
+
+                        client_event.events = EPOLLIN;
+                        client_event.data.fd = client_fd;
+
+                        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_event) < 0) {
+                            std::cerr << "Failed to add client socket to epoll" << std::endl;
+                            close(client_fd);
+                            continue;
+                        }
                     }
                 }
                 else {
                     int client_fd = events[i].data.fd;
-
-                    char buffer[1024];
-
-                    ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-                    if (bytes_received > 0) {
+                    while(true){
+                        char buffer[1024];
                     
-                        buffer[bytes_received] = '\0';
+                        ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
                     
-                        receive_buffers[client_fd] += buffer;
-                    
-                        size_t newline_pos;
-                    
-                        while ((newline_pos = receive_buffers[client_fd].find('\n')) != std::string::npos) {
-                            
-                            std::string command = receive_buffers[client_fd].substr(0,newline_pos);
-                            
-                            receive_buffers[client_fd].erase(0,newline_pos + 1);
+                        if (bytes_received > 0) {
                         
-                            processCommand(client_fd, command);
+                            buffer[bytes_received] = '\0';
+                        
+                            receive_buffers[client_fd] += buffer;
+                        
+                            size_t newline_pos;
+                        
+                            while ((newline_pos = receive_buffers[client_fd].find('\n')) != std::string::npos) {
+                                
+                                std::string command = receive_buffers[client_fd].substr(0,newline_pos);
+                                
+                                receive_buffers[client_fd].erase(0,newline_pos + 1);
+                            
+                                processCommand(client_fd, command);
+                            }
+                        }
+                        else if (bytes_received == 0) {
+                        
+                            std::cout << "Client disconnected" << std::endl;
+                        
+                            epoll_ctl(epoll_fd,EPOLL_CTL_DEL,client_fd,nullptr);
+                        
+                            close(client_fd);
+                        
+                            receive_buffers.erase(client_fd);
+
+                            break;
+                        }
+                        else {
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                            }
+                            std::cerr << "recv failed: "<< errno<< " - "<< strerror(errno)<< std::endl;
+                            
+                            epoll_ctl(epoll_fd,EPOLL_CTL_DEL,client_fd,nullptr);
+                            
+                            close(client_fd);
+                            receive_buffers.erase(client_fd);
+
+                            break;
+                            
                         }
                     }
                 }
