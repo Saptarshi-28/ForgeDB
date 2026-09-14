@@ -18,6 +18,9 @@ add_executable(forgedb
         src/storage/WAL.cpp
         src/concurrency/ThreadPool.cpp
 )
+add_executable(forge_benchmark
+        benchmarks/Benchmark.cpp
+)
 
 target_include_directories(forgedb
         PRIVATE
