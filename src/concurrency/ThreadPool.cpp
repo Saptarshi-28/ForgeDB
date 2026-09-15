@@ -36,6 +36,9 @@ namespace forgedb::concurrency {
     {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                return;
+            }
             jobs_.push(std::move(job));
         }
         condition_.notify_one();
@@ -48,7 +51,7 @@ namespace forgedb::concurrency {
             stopping_=true;
         }
         condition_.notify_all();
-        
+
         for(auto& worker:workers_){
             if(worker.joinable()){
                 worker.join();

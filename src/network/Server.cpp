@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <netinet/tcp.h>
 #include <cstring>
 
 namespace forgedb::network {
@@ -73,9 +74,9 @@ namespace forgedb::network {
         server_event.data.fd = server_fd;
 
         if (epoll_ctl(epoll_fd,EPOLL_CTL_ADD,server_fd,&server_event) < 0) {
-            
+
             std::cerr << "Failed to add server socket to epoll"<< std::endl;
-            
+
             close(response_event_fd_);
             close(epoll_fd);
             close(server_fd);
@@ -88,15 +89,15 @@ namespace forgedb::network {
         response_event.data.fd = response_event_fd_;
 
         if (epoll_ctl(epoll_fd,EPOLL_CTL_ADD,response_event_fd_,&response_event) < 0) {
-            
+
             std::cerr << "Failed to add response event to epoll"<< std::endl;
-            
+
             close(response_event_fd_);
             close(epoll_fd);
             close(server_fd);
             return;
         }
-        
+
         epoll_event events[10];
 
         std::cout << "ForgeDB server started on port " << PORT << std::endl;
@@ -118,14 +119,23 @@ namespace forgedb::network {
                         socklen_t client_address_length = sizeof(client_address);
 
                         int client_fd = accept(server_fd,reinterpret_cast<sockaddr*>(&client_address),&client_address_length);
-                    
+                        int flag = 1;
                         if (client_fd < 0) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                                break;
+                            }
                             std::cerr << "Failed to accept client" << std::endl;
                             break;
                         }
-                    
-                        std::cout << "Client connected!" << std::endl;
+                        if (setsockopt(
+                                client_fd,
+                                IPPROTO_TCP,
+                                TCP_NODELAY,
+                                &flag,
+                                sizeof(flag)) < 0) {
+
+                            std::cerr << "Failed to enable TCP_NODELAY for client\n";
+                        }
 
                         int client_flags = fcntl(client_fd, F_GETFL, 0);
 
@@ -154,8 +164,11 @@ namespace forgedb::network {
 
                     uint64_t value;
 
-                    read(response_event_fd_,&value,sizeof(value));
-                
+                    if (read(response_event_fd_, &value, sizeof(value)) < 0) {
+                        std::cerr << "eventfd read failed: "
+                                  << strerror(errno) << std::endl;
+                    }
+
                     while (true) {
 
                         ClientResponse response;
@@ -166,7 +179,7 @@ namespace forgedb::network {
                             if (responseQueue_.empty()) {
                                 break;
                             }
-                        
+
                             response = std::move(responseQueue_.front());
                             responseQueue_.pop();
                         }
@@ -185,24 +198,24 @@ namespace forgedb::network {
                     if (events[i].events & EPOLLOUT) {
                         handleWrite(epoll_fd, client_fd);
                     }
-                
+
                     if (!(events[i].events & EPOLLIN)) {
                         continue;
                     }
 
                     while(true){
                         char buffer[1024];
-                    
+
                         ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-                    
+
                         if (bytes_received > 0) {
-                        
+
                             buffer[bytes_received] = '\0';
-                        
+
                             clients_[client_fd].receive_buffer += buffer;
-                        
+
                             size_t newline_pos;
-                        
+
                             while ((newline_pos = clients_[client_fd].receive_buffer.find('\n')) != std::string::npos) {
                                 std::string command = clients_[client_fd].receive_buffer.substr(0, newline_pos);
                                 clients_[client_fd].receive_buffer.erase(0, newline_pos + 1);
@@ -210,13 +223,11 @@ namespace forgedb::network {
                             }
                         }
                         else if (bytes_received == 0) {
-                        
-                            std::cout << "Client disconnected" << std::endl;
-                        
+
                             epoll_ctl(epoll_fd,EPOLL_CTL_DEL,client_fd,nullptr);
-                        
+
                             close(client_fd);
-                        
+
                             active_clients_.erase(client_fd);
                             clients_.erase(client_fd);
 
@@ -227,32 +238,33 @@ namespace forgedb::network {
                                 break;
                             }
                             std::cerr << "recv failed: "<< errno<< " - "<< strerror(errno)<< std::endl;
-                            
+
                             epoll_ctl(epoll_fd,EPOLL_CTL_DEL,client_fd,nullptr);
-                            
+
                             close(client_fd);
 
                             active_clients_.erase(client_fd);
                             clients_.erase(client_fd);
 
                             break;
-                            
+
                         }
                     }
                 }
             }
         }
+
         close(server_fd);
-    }    
+    }
 
     ClientResponse Server::processCommand(int client_fd,const std::string& command)
     {
         forgedb::commands::CommandParser parser;
-    
+
         auto parsed = parser.parse(command);
-    
+
         std::string response = commandHandler_.execute(parsed);
-    
+
         return ClientResponse{
             client_fd,
             0, // generation will be set later
@@ -325,7 +337,7 @@ namespace forgedb::network {
             }
 
             ClientState& client = it->second;
-            
+
             constexpr std::size_t MAX_QUEUE_SIZE = 1000;
 
             if (client.command_queue.size() >= MAX_QUEUE_SIZE) {
@@ -336,7 +348,7 @@ namespace forgedb::network {
                         "ERR server busy\n"
                     }
                 );
-            
+
                 uint64_t value = 1;
                 write(response_event_fd_, &value, sizeof(value));
                 return;
@@ -357,43 +369,48 @@ namespace forgedb::network {
     {
         threadPool_.submit([this, client_fd]() {
 
-            std::string command;
-            
-            uint64_t generation;
-            {   
-                std::lock_guard<std::mutex> lock(responseMutex_);
+            while (true) {
 
-                auto it = clients_.find(client_fd);
+                std::string command;
+                uint64_t generation;
 
-                if (it == clients_.end()) {
-                    return;
+                {
+                    std::lock_guard<std::mutex> lock(responseMutex_);
+
+                    auto it = clients_.find(client_fd);
+
+                    if (it == clients_.end()) {
+                        return;
+                    }
+
+                    ClientState& client = it->second;
+
+                    if (client.command_queue.empty()) {
+                        client.processing = false;
+                        return;
+                    }
+
+                    generation = client.generation;
+
+                    command = std::move(client.command_queue.front());
+                    client.command_queue.pop_front();
                 }
 
-                ClientState& client = it->second;
-                generation = client.generation;
+                ClientResponse result = processCommand(client_fd, command);
 
-                if (client.command_queue.empty()) {
-                    client.processing = false;
-                    return;
+                result.generation = generation;
+
+                {
+                    std::lock_guard<std::mutex> lock(responseMutex_);
+                    responseQueue_.push(std::move(result));
                 }
 
-                command = std::move(client.command_queue.front());
-                client.command_queue.pop_front();
+                uint64_t value = 1;
+                if (write(response_event_fd_, &value, sizeof(value)) < 0) {
+                    std::cerr << "eventfd write failed: "
+                              << strerror(errno) << std::endl;
+                }
             }
-
-            ClientResponse result = processCommand(client_fd, command);
-            result.generation = generation;
-
-            {
-                std::lock_guard<std::mutex> lock(responseMutex_);
-                responseQueue_.push(std::move(result));
-            }
-
-            uint64_t value = 1;
-
-            write(response_event_fd_,&value,sizeof(value));
-
-            processNextCommand(client_fd);
         });
     }
 }
