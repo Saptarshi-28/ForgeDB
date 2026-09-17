@@ -8,7 +8,7 @@ namespace forgedb::storage {
 	KeyValueStore::KeyValueStore(const std::string& wal_filename): wal_(wal_filename)
 	{
 		auto operations = wal_.replay();
-		
+
 		for (const auto& operation : operations) {
         	applyOperation(operation);
     	}
@@ -49,11 +49,19 @@ namespace forgedb::storage {
 		return it->second;
 	}
 
-	bool KeyValueStore::remove(const std::string& key){
-		std::unique_lock<std::shared_mutex> lock(mutex_);
-		bool removed = data_.erase(key) > 0;
-    	if (removed) wal_.append("DELETE " + key);
-    	return removed;
-	}
+	bool KeyValueStore::remove(const std::string& key)
+	{
+	    std::unique_lock<std::shared_mutex> lock(mutex_);
 
+	    auto it = data_.find(key);
+
+	    if (it == data_.end()) {
+	        return false;
+	    }
+
+	    wal_.append("DELETE " + key);
+	    data_.erase(it);
+
+	    return true;
+	}
 }

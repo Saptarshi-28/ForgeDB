@@ -1,15 +1,21 @@
 #pragma once
+
 #include <string>
 #include <vector>
 
 namespace forgedb::storage {
 
-    class WAL {
-        public:
-            WAL(const std::string& filename);
-            void append(const std::string& operation);
-            std::vector<std::string> replay();
-        private:
-            std::string filename_;
-    };
+class WAL {
+public:
+    WAL(const std::string& filename);
+    ~WAL();
+
+    void append(const std::string& operation);
+    std::vector<std::string> replay();
+
+private:
+    std::string filename_;
+    int fd_;
+};
+
 }
