@@ -80,4 +80,15 @@ namespace forgedb::storage{
 
         return operations;
     }
+
+    void WAL::reset()
+    {
+        if (ftruncate(fd_, 0) < 0) {
+            throw std::runtime_error("Failed to truncate WAL");
+        }
+
+        if (fsync(fd_) < 0) {
+            throw std::runtime_error("Failed to sync WAL reset");
+        }
+    }
 }

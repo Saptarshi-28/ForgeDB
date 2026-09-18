@@ -12,6 +12,7 @@ public:
 
     void append(const std::string& operation);
     std::vector<std::string> replay();
+    void reset();
 
 private:
     std::string filename_;

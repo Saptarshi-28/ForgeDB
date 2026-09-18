@@ -17,6 +17,8 @@ add_executable(forgedb
         src/commands/CommandHandler.cpp
         src/storage/WAL.cpp
         src/concurrency/ThreadPool.cpp
+        src/storage/MemTable.cpp
+        src/storage/SSTable.cpp
 )
 add_executable(forge_benchmark
         benchmarks/Benchmark.cpp
@@ -36,3 +38,10 @@ target_include_directories(thread_pool_test
         PRIVATE
         include
 )
+
+add_executable(sstable_test
+        tests/SSTableTest.cpp
+        src/storage/SSTable.cpp
+)
+
+target_include_directories(sstable_test PRIVATE include)

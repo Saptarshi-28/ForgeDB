@@ -3,3 +3,5 @@ build/
 *.a
 *.so
 forge.wal
+sstable_*.db
+sstable_*.db.tmp
