@@ -20,6 +20,7 @@ add_executable(forgedb
         src/commands/CommandParser.cpp
         src/commands/CommandHandler.cpp
         src/concurrency/ThreadPool.cpp
+        src/storage/BloomFilter.cpp
 )
 
 add_executable(forge_benchmark
@@ -44,6 +45,7 @@ target_include_directories(thread_pool_test
 add_executable(sstable_test
         tests/SSTableTest.cpp
         src/storage/SSTable.cpp
+        src/storage/BloomFilter.cpp
 )
 
 target_include_directories(sstable_test PRIVATE include)
@@ -51,7 +53,23 @@ target_include_directories(sstable_test PRIVATE include)
 add_executable(compaction_test
         tests/CompactionTest.cpp
         src/storage/SSTable.cpp
+        src/storage/BloomFilter.cpp
         src/storage/Compaction.cpp
 )
 
 target_include_directories(compaction_test PRIVATE include)
+
+add_executable(bloom_filter_test
+        tests/BloomFilterTest.cpp
+        src/storage/BloomFilter.cpp
+)
+
+target_include_directories(bloom_filter_test PRIVATE include)
+
+add_executable(bloom_sstable_test
+        tests/BloomSSTableTest.cpp
+        src/storage/SSTable.cpp
+        src/storage/BloomFilter.cpp
+)
+
+target_include_directories(bloom_sstable_test PRIVATE include)

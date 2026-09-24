@@ -16,14 +16,13 @@ void Compaction::compact(
 {
     std::unordered_map<std::string, SSTableEntry> latest_entries;
 
-    // input_files must be ordered oldest -> newest.
+    // Read oldest -> newest.
+    // Newer entries overwrite older entries for the same key.
     for (const auto& filename : input_files) {
 
         auto entries = SSTable::readAll(filename);
 
         for (const auto& entry : entries) {
-            // Newer SSTables overwrite older entries
-            // for the same key.
             latest_entries[entry.key] = entry;
         }
     }
@@ -44,26 +43,52 @@ void Compaction::compact(
         }
     );
 
+    // Write the new compacted SSTable first.
+    // SSTable::write() also creates its Bloom filter.
     SSTable::write(
         output_file,
         merged_entries
     );
 
+    // Only after the new SSTable is safely written
+    // do we remove the old SSTables and Bloom filters.
     for (const auto& filename : input_files) {
+
         std::filesystem::remove(filename);
+
+        std::string bloom_filename = filename;
+
+        if (bloom_filename.ends_with(".db")) {
+            bloom_filename.replace(
+                bloom_filename.size() - 3,
+                3,
+                ".bf"
+            );
+
+            std::filesystem::remove(bloom_filename);
+        }
     }
 
-    int dir_fd = open(".", O_RDONLY | O_DIRECTORY);
+    // Persist deletion of the old files.
+    int dir_fd = open(
+        ".",
+        O_RDONLY | O_DIRECTORY
+    );
 
     if (dir_fd < 0) {
-        throw std::runtime_error("Failed to open compaction directory");
+        throw std::runtime_error(
+            "Failed to open compaction directory"
+        );
     }
-    
+
     if (fsync(dir_fd) < 0) {
         close(dir_fd);
-        throw std::runtime_error("Failed to sync compaction directory");
+
+        throw std::runtime_error(
+            "Failed to sync compaction directory"
+        );
     }
-    
+
     close(dir_fd);
 }
 

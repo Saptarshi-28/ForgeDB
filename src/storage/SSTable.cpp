@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstdio>
+#include "storage/BloomFilter.h"
+#include <algorithm>
 
 namespace forgedb::storage {
 
@@ -14,6 +16,7 @@ namespace forgedb::storage {
     )
     {
         std::string temp_filename = filename + ".tmp";
+
         int fd = open(
             temp_filename.c_str(),
             O_WRONLY | O_CREAT | O_TRUNC,
@@ -52,7 +55,9 @@ namespace forgedb::storage {
 
                 if (bytes_written < 0) {
                     close(fd);
-                    throw std::runtime_error("Failed to write SSTable");
+                    throw std::runtime_error(
+                        "Failed to write SSTable"
+                    );
                 }
 
                 total_written += bytes_written;
@@ -61,27 +66,75 @@ namespace forgedb::storage {
 
         if (fsync(fd) < 0) {
             close(fd);
-            throw std::runtime_error("Failed to sync SSTable");
+            throw std::runtime_error(
+                "Failed to sync SSTable"
+            );
         }
 
         close(fd);
 
-        if (std::rename(temp_filename.c_str(), filename.c_str()) != 0) {
-            throw std::runtime_error("Failed to rename SSTable");
+        if (std::rename(
+                temp_filename.c_str(),
+                filename.c_str()
+            ) != 0) {
+
+            throw std::runtime_error(
+                "Failed to rename SSTable"
+            );
         }
 
-        int dir_fd = open(".", O_RDONLY | O_DIRECTORY);
+        int dir_fd = open(
+            ".",
+            O_RDONLY | O_DIRECTORY
+        );
 
         if (dir_fd < 0) {
-            throw std::runtime_error("Failed to open SSTable directory");
+            throw std::runtime_error(
+                "Failed to open SSTable directory"
+            );
         }
 
         if (fsync(dir_fd) < 0) {
             close(dir_fd);
-            throw std::runtime_error("Failed to sync SSTable directory");
+
+            throw std::runtime_error(
+                "Failed to sync SSTable directory"
+            );
         }
 
         close(dir_fd);
+
+        // Build Bloom filter only after the SSTable
+        // has been successfully published.
+        std::size_t bloom_bit_count =
+            std::max<std::size_t>(
+                1024,
+                entries.size() * 10
+            );
+
+        BloomFilter bloom(
+            bloom_bit_count,
+            7
+        );
+
+        for (const auto& entry : entries) {
+            bloom.add(entry.key);
+        }
+
+        std::string bloom_filename = filename;
+
+        if (bloom_filename.ends_with(".db")) {
+            bloom_filename.replace(
+                bloom_filename.size() - 3,
+                3,
+                ".bf"
+            );
+        }
+        else {
+            bloom_filename += ".bf";
+        }
+
+        bloom.save(bloom_filename);
     }
 
     std::string SSTable::get(
@@ -107,6 +160,33 @@ namespace forgedb::storage {
         const std::string& key
     )
     {
+        std::string bloom_filename = filename;
+
+        if (bloom_filename.ends_with(".db")) {
+            bloom_filename.replace(
+                bloom_filename.size() - 3,
+                3,
+                ".bf"
+            );
+        }
+        else {
+            bloom_filename += ".bf";
+        }
+
+        try {
+            BloomFilter bloom =
+                BloomFilter::load(bloom_filename);
+
+            if (!bloom.possiblyContains(key)) {
+                return std::nullopt;
+            }
+        }
+        catch (...) {
+            // Bloom filter is only an optimization.
+            // If it is missing or corrupt, fall back
+            // to scanning the SSTable normally.
+        }
+
         std::ifstream file(filename);
 
         if (!file.is_open()) {

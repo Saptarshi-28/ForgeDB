@@ -42,6 +42,6 @@ int main()
     ) << '\n';
 
     std::filesystem::remove(filename);
-
+    std::filesystem::remove("sstable_test.bf");
     return 0;
 }
