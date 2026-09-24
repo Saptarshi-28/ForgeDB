@@ -43,5 +43,6 @@ int main()
 
     std::filesystem::remove(filename);
     std::filesystem::remove("sstable_test.bf");
+    std::filesystem::remove("sstable_test.idx");
     return 0;
 }

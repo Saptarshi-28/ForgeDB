@@ -1,6 +1,6 @@
 #include "storage/SSTable.h"
 #include "storage/Compaction.h"
-
+#include <filesystem>
 #include <iostream>
 #include <vector>
 
@@ -58,6 +58,8 @@ int main()
                 << '\n';
         }
     }
-
+    std::filesystem::remove("compaction_output.db");
+    std::filesystem::remove("compaction_output.bf");
+    std::filesystem::remove("compaction_output.idx");
     return 0;
 }

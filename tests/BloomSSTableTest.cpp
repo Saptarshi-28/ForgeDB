@@ -10,7 +10,7 @@ int main()
 
     const std::string db_file = "bloom_sstable_test.db";
     const std::string bf_file = "bloom_sstable_test.bf";
-
+    const std::string idx_file = "bloom_sstable_test.idx";
     std::vector<SSTableEntry> entries = {
         {"apple", "red", false},
         {"banana", "yellow", false},
@@ -42,6 +42,7 @@ int main()
         << '\n';
 
     std::filesystem::remove(db_file);
-
+    std::filesystem::remove(bf_file);
+    std::filesystem::remove(idx_file);
     return 0;
 }

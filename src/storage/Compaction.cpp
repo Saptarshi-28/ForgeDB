@@ -67,6 +67,18 @@ void Compaction::compact(
 
             std::filesystem::remove(bloom_filename);
         }
+
+        std::string index_filename = filename;
+
+        if (index_filename.ends_with(".db")) {
+            index_filename.replace(
+                index_filename.size() - 3,
+                3,
+                ".idx"
+            );
+
+            std::filesystem::remove(index_filename);
+        }
     }
 
     // Persist deletion of the old files.

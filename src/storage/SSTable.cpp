@@ -7,6 +7,7 @@
 #include <cstdio>
 #include "storage/BloomFilter.h"
 #include <algorithm>
+#include "storage/SSTableIndex.h"
 
 namespace forgedb::storage {
 
@@ -26,6 +27,12 @@ namespace forgedb::storage {
         if (fd < 0) {
             throw std::runtime_error("Failed to open SSTable file");
         }
+        SSTableIndex index;
+
+        constexpr std::size_t INDEX_INTERVAL = 100;
+
+        std::uint64_t current_offset = 0;
+        std::size_t record_number = 0;
 
         for (const auto& entry : entries) {
 
@@ -43,6 +50,12 @@ namespace forgedb::storage {
                     "\n";
             }
 
+            if (record_number % INDEX_INTERVAL == 0) {
+                index.add(
+                    entry.key,
+                    current_offset
+                );
+            }
             std::size_t total_written = 0;
 
             while (total_written < record.size()) {
@@ -62,6 +75,11 @@ namespace forgedb::storage {
 
                 total_written += bytes_written;
             }
+
+            current_offset +=
+                static_cast<std::uint64_t>(record.size());
+
+            ++record_number;
         }
 
         if (fsync(fd) < 0) {
@@ -135,6 +153,21 @@ namespace forgedb::storage {
         }
 
         bloom.save(bloom_filename);
+
+        std::string index_filename = filename;
+
+        if (index_filename.ends_with(".db")) {
+            index_filename.replace(
+                index_filename.size() - 3,
+                3,
+                ".idx"
+            );
+        }
+        else {
+            index_filename += ".idx";
+        }
+
+        index.save(index_filename);
     }
 
     std::string SSTable::get(
@@ -187,10 +220,48 @@ namespace forgedb::storage {
             // to scanning the SSTable normally.
         }
 
-        std::ifstream file(filename);
+        std::uint64_t start_offset = 0;
+
+        std::string index_filename = filename;
+
+        if (index_filename.ends_with(".db")) {
+            index_filename.replace(
+                index_filename.size() - 3,
+                3,
+                ".idx"
+            );
+        }
+        else {
+            index_filename += ".idx";
+        }
+
+        try {
+            SSTableIndex index =
+                SSTableIndex::load(index_filename);
+
+            start_offset =
+                index.findOffset(key);
+        }
+        catch (...) {
+            // Index is only an optimization.
+            // If it is missing or corrupt,
+            // scan from the beginning.
+            start_offset = 0;
+        }
+
+        std::ifstream file(filename, std::ios::binary);
 
         if (!file.is_open()) {
             return std::nullopt;
+        }
+
+        file.seekg(
+            static_cast<std::streamoff>(start_offset)
+        );
+
+        if (!file) {
+            file.clear();
+            file.seekg(0);
         }
 
         std::string line;
