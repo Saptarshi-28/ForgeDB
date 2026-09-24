@@ -26,6 +26,9 @@ public:
         const std::string& filename,
         const std::string& key
     );
+    static std::vector<SSTableEntry> readAll(
+        const std::string& filename
+    );
 };
 
 }

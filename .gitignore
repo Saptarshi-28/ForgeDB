@@ -5,3 +5,4 @@ build/
 forge.wal
 sstable_*.db
 sstable_*.db.tmp
+compaction_*.db

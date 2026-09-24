@@ -75,12 +75,12 @@ namespace forgedb::storage {
         if (dir_fd < 0) {
             throw std::runtime_error("Failed to open SSTable directory");
         }
-        
+
         if (fsync(dir_fd) < 0) {
             close(dir_fd);
             throw std::runtime_error("Failed to sync SSTable directory");
         }
-        
+
         close(dir_fd);
     }
 
@@ -101,7 +101,7 @@ namespace forgedb::storage {
 
         return result->value;
     }
-    
+
     std::optional<SSTableEntry> SSTable::lookup(
         const std::string& filename,
         const std::string& key
@@ -169,5 +169,70 @@ namespace forgedb::storage {
         }
 
         return std::nullopt;
+    }
+
+    std::vector<SSTableEntry> SSTable::readAll(
+        const std::string& filename
+    )
+    {
+        std::vector<SSTableEntry> entries;
+
+        std::ifstream file(filename);
+
+        if (!file.is_open()) {
+            return entries;
+        }
+
+        std::string line;
+
+        while (std::getline(file, line)) {
+
+            if (line.size() < 3) {
+                continue;
+            }
+
+            char type = line[0];
+
+            if (line[1] != '\t') {
+                continue;
+            }
+
+            if (type == 'D') {
+
+                std::string key = line.substr(2);
+
+                entries.push_back(
+                    SSTableEntry{
+                        key,
+                        "",
+                        true
+                    }
+                );
+            }
+            else if (type == 'V') {
+
+                std::size_t key_end = line.find('\t', 2);
+
+                if (key_end == std::string::npos) {
+                    continue;
+                }
+
+                std::string key =
+                    line.substr(2, key_end - 2);
+
+                std::string value =
+                    line.substr(key_end + 1);
+
+                entries.push_back(
+                    SSTableEntry{
+                        key,
+                        value,
+                        false
+                    }
+                );
+            }
+        }
+
+        return entries;
     }
 }

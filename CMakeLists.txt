@@ -13,13 +13,15 @@ add_executable(forgedb
         src/main.cpp
         src/network/Server.cpp
         src/storage/KeyValueStore.cpp
-        src/commands/CommandParser.cpp
-        src/commands/CommandHandler.cpp
         src/storage/WAL.cpp
-        src/concurrency/ThreadPool.cpp
         src/storage/MemTable.cpp
         src/storage/SSTable.cpp
+        src/storage/Compaction.cpp
+        src/commands/CommandParser.cpp
+        src/commands/CommandHandler.cpp
+        src/concurrency/ThreadPool.cpp
 )
+
 add_executable(forge_benchmark
         benchmarks/Benchmark.cpp
 )
@@ -45,3 +47,11 @@ add_executable(sstable_test
 )
 
 target_include_directories(sstable_test PRIVATE include)
+
+add_executable(compaction_test
+        tests/CompactionTest.cpp
+        src/storage/SSTable.cpp
+        src/storage/Compaction.cpp
+)
+
+target_include_directories(compaction_test PRIVATE include)
