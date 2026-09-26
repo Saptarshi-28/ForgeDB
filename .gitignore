@@ -5,4 +5,8 @@ build/
 forge.wal
 sstable_*.db
 sstable_*.db.tmp
+sstable_*.bf
+sstable_*.bf.tmp
+sstable_*.idx
+sstable_*.idx.tmp
 compaction_*.db
