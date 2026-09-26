@@ -35,7 +35,7 @@ namespace forgedb::network {
 
 			forgedb::storage::KeyValueStore store_{"forge.wal"};
 			forgedb::commands::CommandHandler commandHandler_{store_};
-			forgedb::concurrency::ThreadPool threadPool_{4};
+			forgedb::concurrency::ThreadPool threadPool_{8};
 
 			std::unordered_map<int, std::string> output_buffers_;
 			std::queue<ClientResponse> responseQueue_;

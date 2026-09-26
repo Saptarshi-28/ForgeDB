@@ -5,9 +5,26 @@
 #include <filesystem>
 #include <algorithm>
 #include "storage/Compaction.h"
+#include <exception>
 
 namespace forgedb::storage {
 
+	KeyValueStore::~KeyValueStore()
+	{
+	    {
+	        std::lock_guard<std::mutex> lock(
+	            write_queue_mutex_
+	        );
+
+	        stopping_ = true;
+	    }
+
+	    write_queue_cv_.notify_all();
+
+	    if (writer_thread_.joinable()) {
+	        writer_thread_.join();
+	    }
+	}
 	KeyValueStore::KeyValueStore(const std::string& wal_filename): wal_(wal_filename)
 	{
 		initializeNextSSTableId();
@@ -17,7 +34,46 @@ namespace forgedb::storage {
 		for (const auto& operation : operations) {
         	applyOperation(operation);
     	}
+		writer_thread_ = std::thread(
+		    &KeyValueStore::writerLoop,
+		    this
+		);
 	}
+
+	void KeyValueStore::writerLoop()
+	{
+	    while (true) {
+
+	        {
+	            std::unique_lock<std::mutex> lock(
+	                write_queue_mutex_
+	            );
+
+	            write_queue_cv_.wait(
+	                lock,
+	                [this]() {
+	                    return
+	                        stopping_ ||
+	                        !pending_writes_.empty();
+	                }
+	            );
+
+	            /*
+	             * During shutdown, only exit once all
+	             * already-queued writes have been handled.
+	             */
+	            if (
+	                stopping_ &&
+	                pending_writes_.empty()
+	            ) {
+	                return;
+	            }
+	        }
+
+	        processWriteBatches();
+	    }
+	}
+
 	void KeyValueStore::applyOperation(const std::string& operation)
 	{
 	    std::istringstream stream(operation);
@@ -41,16 +97,16 @@ namespace forgedb::storage {
 	    }
 	}
 
-	void KeyValueStore::set(const std::string& key, const std::string& value)
+	void KeyValueStore::set(
+	    const std::string& key,
+	    const std::string& value
+	)
 	{
-	    std::unique_lock<std::shared_mutex> lock(mutex_);
-
-	    wal_.append("SET " + key + " " + value);
-	    memtable_.set(key, value);
-
-		if (memtable_.shouldFlush(MEMTABLE_MAX_ENTRIES)) {
-		    flushMemTable();
-		}
+	    submitWrite(
+	        WriteType::SET,
+	        key,
+	        value
+	    );
 	}
 
 	std::string KeyValueStore::get(const std::string& key)
@@ -85,56 +141,22 @@ namespace forgedb::storage {
 	    return "";
 	}
 
-	bool KeyValueStore::remove(const std::string& key)
+	bool KeyValueStore::remove(
+	    const std::string& key
+	)
 	{
-	    std::unique_lock<std::shared_mutex> lock(mutex_);
-
-	    bool exists = false;
-
-	    if (memtable_.contains(key)) {
-	        exists = true;
-	    }
-	    else if (memtable_.isDeleted(key)) {
-	        return false;
-	    }
-	    else {
-	        auto tables = listSSTables();
-
-	        for (auto it = tables.rbegin(); it != tables.rend(); ++it) {
-
-	            auto result = SSTable::lookup(*it, key);
-
-	            if (!result.has_value()) {
-	                continue;
-	            }
-
-	            if (result->deleted) {
-	                return false;
-	            }
-
-	            exists = true;
-	            break;
-	        }
-	    }
-
-	    if (!exists) {
-	        return false;
-	    }
-
-	    wal_.append("DELETE " + key);
-	    memtable_.remove(key);
-
-	    if (memtable_.shouldFlush(MEMTABLE_MAX_ENTRIES)) {
-	        flushMemTable();
-	    }
-
-	    return true;
+	    return submitWrite(
+	        WriteType::DELETE,
+	        key,
+	        ""
+	    );
 	}
 
 	std::string KeyValueStore::nextSSTableFilename()
 	{
 	    return "sstable_" + std::to_string(next_sstable_id_++) + ".db";
 	}
+
 	void KeyValueStore::initializeNextSSTableId()
 	{
 	    namespace fs = std::filesystem;
@@ -264,5 +286,242 @@ namespace forgedb::storage {
 	        tables,
 	        output_file
 	    );
+	}
+
+	bool KeyValueStore::submitWrite(
+	    WriteType type,
+	    const std::string& key,
+	    const std::string& value
+	)
+	{
+	    auto request =
+	        std::make_shared<PendingWrite>();
+
+	    request->type = type;
+	    request->key = key;
+	    request->value = value;
+
+	    std::future<bool> result =
+	        request->completion.get_future();
+
+	    {
+	        std::lock_guard<std::mutex> lock(
+	            write_queue_mutex_
+	        );
+
+	        pending_writes_.push_back(request);
+	    }
+
+	    /*
+	     * Wake the dedicated writer thread.
+	     */
+	    write_queue_cv_.notify_one();
+
+	    /*
+	     * This worker waits until the writer has:
+	     *
+	     * WAL write
+	     *      ↓
+	     * fsync
+	     *      ↓
+	     * MemTable update
+	     */
+	    return result.get();
+	}
+
+	void KeyValueStore::processWriteBatches()
+	{
+	    while (true) {
+
+	        std::deque<std::shared_ptr<PendingWrite>> batch;
+
+	        {
+	            std::lock_guard<std::mutex> lock(
+	                write_queue_mutex_
+	            );
+
+	            // No more work.
+	            // We can safely give up leadership.
+	            if (pending_writes_.empty()) {
+	                return;
+	            }
+
+	            batch.swap(pending_writes_);
+	        }
+
+	        try {
+
+	            /*
+	             * Only the batch leader modifies the actual
+	             * KeyValueStore write state.
+	             *
+	             * Readers are also prevented from observing
+	             * a partially-applied batch.
+	             */
+	            std::unique_lock<std::shared_mutex> store_lock(
+	                mutex_
+	            );
+
+	            /*
+	             * Step 1:
+	             * Write every operation in this batch to WAL.
+	             *
+	             * No fsync yet.
+	             */
+	            for (const auto& request : batch) {
+
+	                if (request->type == WriteType::SET) {
+
+	                    wal_.appendWithoutSync(
+	                        "SET " +
+	                        request->key +
+	                        " " +
+	                        request->value
+	                    );
+	                }
+	                else {
+
+	                    wal_.appendWithoutSync(
+	                        "DELETE " +
+	                        request->key
+	                    );
+	                }
+	            }
+
+	            /*
+	             * Step 2:
+	             * One fsync makes the entire batch durable.
+	             */
+	            wal_.sync();
+
+	            /*
+	             * Step 3:
+	             * Apply operations to the MemTable
+	             * in exactly the same order as WAL.
+	             */
+	            for (auto& request : batch) {
+
+	                if (request->type == WriteType::SET) {
+
+	                    memtable_.set(
+	                        request->key,
+	                        request->value
+	                    );
+
+	                    request->completion.set_value(true);
+	                }
+	                else {
+
+	                    bool existed = false;
+
+	                    if (memtable_.contains(request->key)) {
+
+	                        existed = true;
+	                    }
+	                    else if (memtable_.isDeleted(request->key)) {
+
+	                        existed = false;
+	                    }
+	                    else {
+
+	                        auto tables = listSSTables();
+
+	                        for (
+	                            auto it = tables.rbegin();
+	                            it != tables.rend();
+	                            ++it
+	                        ) {
+
+	                            auto result =
+	                                SSTable::lookup(
+	                                    *it,
+	                                    request->key
+	                                );
+
+	                            if (!result.has_value()) {
+	                                continue;
+	                            }
+
+	                            if (result->deleted) {
+	                                existed = false;
+	                            }
+	                            else {
+	                                existed = true;
+	                            }
+
+	                            break;
+	                        }
+	                    }
+
+	                    /*
+	                     * WAL already contains this DELETE,
+	                     * so apply its tombstone even if the
+	                     * key did not previously exist.
+	                     */
+	                    memtable_.remove(request->key);
+
+	                    request->completion.set_value(existed);
+	                }
+	            }
+
+	            /*
+	             * Step 4:
+	             * Flush only after the complete durable batch
+	             * has been applied.
+	             */
+	            if (
+	                memtable_.shouldFlush(
+	                    MEMTABLE_MAX_ENTRIES
+	                )
+	            ) {
+	                flushMemTable();
+	            }
+	        }
+	        catch (...) {
+
+	            std::exception_ptr error =
+	                std::current_exception();
+
+	            /*
+	             * Any promises that haven't already been
+	             * completed receive the exception.
+	             */
+	            for (auto& request : batch) {
+	                try {
+	                    request->completion.set_exception(
+	                        error
+	                    );
+	                }
+	                catch (...) {
+	                    // Promise may already have been completed.
+	                }
+	            }
+
+	            /*
+	             * Also fail requests that were queued while
+	             * this batch was running.
+	             */
+	            std::deque<std::shared_ptr<PendingWrite>> waiting;
+	            {
+	                std::lock_guard<std::mutex> lock(
+	                    write_queue_mutex_
+	                );
+
+	                waiting.swap(pending_writes_);
+	            }
+
+	            for (auto& request : waiting) {
+	                try {
+	                    request->completion.set_exception(
+	                        error
+	                    );
+	                }
+	                catch (...) {
+	                }
+	            }
+
+	            return;
+	        }
+	    }
 	}
 }

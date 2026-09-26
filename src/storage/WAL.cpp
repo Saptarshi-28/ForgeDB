@@ -26,32 +26,6 @@ namespace forgedb::storage{
         }
     }
 
-    void WAL::append(const std::string& operation)
-    {
-        std::string record = operation + "\n";
-
-        std::size_t total_written = 0;
-
-        while (total_written < record.size()) {
-
-            ssize_t bytes_written = write(
-                fd_,
-                record.data() + total_written,
-                record.size() - total_written
-            );
-
-            if (bytes_written < 0) {
-                throw std::runtime_error("Failed to write WAL");
-            }
-
-            total_written += bytes_written;
-        }
-
-        if (fsync(fd_) < 0) {
-            throw std::runtime_error("Failed to sync WAL");
-        }
-    }
-
     std::vector<std::string> WAL::replay()
     {
         std::vector<std::string> operations;
@@ -83,6 +57,8 @@ namespace forgedb::storage{
 
     void WAL::reset()
     {
+        std::lock_guard<std::mutex> lock(mutex_);
+
         if (ftruncate(fd_, 0) < 0) {
             throw std::runtime_error("Failed to truncate WAL");
         }
@@ -91,4 +67,48 @@ namespace forgedb::storage{
             throw std::runtime_error("Failed to sync WAL reset");
         }
     }
+
+    void WAL::append(const std::string& operation)
+    {
+        appendWithoutSync(operation);
+        sync();
+    }
+
+    void WAL::appendWithoutSync(const std::string& operation)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        std::string record = operation + "\n";
+
+        std::size_t total_written = 0;
+
+        while (total_written < record.size()) {
+
+            ssize_t bytes_written = ::write(
+                fd_,
+                record.data() + total_written,
+                record.size() - total_written
+            );
+
+            if (bytes_written < 0) {
+                throw std::runtime_error(
+                    "Failed to write WAL"
+                );
+            }
+
+            total_written += bytes_written;
+        }
+    }
+
+    void WAL::sync()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        if (fsync(fd_) < 0) {
+            throw std::runtime_error(
+                "Failed to sync WAL"
+            );
+        }
+    }
+
 }
