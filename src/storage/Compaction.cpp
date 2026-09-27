@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdexcept>
+#include <cerrno>
+#include <system_error>
 
 namespace forgedb::storage {
 
@@ -50,11 +52,17 @@ void Compaction::compact(
         merged_entries
     );
 
-    // Only after the new SSTable is safely written
-    // do we remove the old SSTables and Bloom filters.
     for (const auto& filename : input_files) {
 
-        std::filesystem::remove(filename);
+        std::error_code ec;
+
+        // Old SSTables are obsolete once the compacted
+        // replacement has been durably published.
+        // Cleanup failures are therefore non-fatal.
+        std::filesystem::remove(
+            filename,
+            ec
+        );
 
         std::string bloom_filename = filename;
 
@@ -65,7 +73,12 @@ void Compaction::compact(
                 ".bf"
             );
 
-            std::filesystem::remove(bloom_filename);
+            ec.clear();
+
+            std::filesystem::remove(
+                bloom_filename,
+                ec
+            );
         }
 
         std::string index_filename = filename;
@@ -77,31 +90,44 @@ void Compaction::compact(
                 ".idx"
             );
 
-            std::filesystem::remove(index_filename);
+            ec.clear();
+
+            std::filesystem::remove(
+                index_filename,
+                ec
+            );
         }
     }
 
     // Persist deletion of the old files.
+    // Best-effort persistence of old-file deletions.
+    // The compacted SSTable is already durable,
+    // so failure here is not a correctness failure.
     int dir_fd = open(
         ".",
         O_RDONLY | O_DIRECTORY
     );
 
-    if (dir_fd < 0) {
-        throw std::runtime_error(
-            "Failed to open compaction directory"
-        );
+    if (dir_fd >= 0) {
+
+        while (true) {
+
+            if (::fsync(dir_fd) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            // Cleanup durability failed.
+            // Old SSTables may remain after a crash,
+            // but the new compacted SSTable is safe.
+            break;
+        }
+
+        ::close(dir_fd);
     }
-
-    if (fsync(dir_fd) < 0) {
-        close(dir_fd);
-
-        throw std::runtime_error(
-            "Failed to sync compaction directory"
-        );
-    }
-
-    close(dir_fd);
 }
 
 }

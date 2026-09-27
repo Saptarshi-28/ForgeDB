@@ -66,7 +66,7 @@ namespace forgedb::storage {
 
 			bool submitWrite(WriteType type,const std::string& key,const std::string& value);
 			void processWriteBatches();
-
+			void cleanupTemporaryFiles();
 	};
 
 }

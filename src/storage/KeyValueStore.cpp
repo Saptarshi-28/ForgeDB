@@ -6,6 +6,8 @@
 #include <algorithm>
 #include "storage/Compaction.h"
 #include <exception>
+#include <filesystem>
+#include <system_error>
 
 namespace forgedb::storage {
 
@@ -27,6 +29,7 @@ namespace forgedb::storage {
 	}
 	KeyValueStore::KeyValueStore(const std::string& wal_filename): wal_(wal_filename)
 	{
+		cleanupTemporaryFiles();
 		initializeNextSSTableId();
 
 		auto operations = wal_.replay();
@@ -522,6 +525,39 @@ namespace forgedb::storage {
 
 	            return;
 	        }
+	    }
+	}
+
+	void KeyValueStore::cleanupTemporaryFiles()
+	{
+	    namespace fs = std::filesystem;
+
+	    for (const auto& entry :
+	         fs::directory_iterator(".")) {
+
+	        if (!entry.is_regular_file()) {
+	            continue;
+	        }
+
+	        std::string filename =
+	            entry.path().filename().string();
+
+	        bool is_storage_temp =
+	            filename.starts_with("sstable_") &&
+	            (
+	                filename.ends_with(".db.tmp") ||
+	                filename.ends_with(".bf.tmp") ||
+	                filename.ends_with(".idx.tmp")
+	            );
+
+	        if (is_storage_temp) {
+			    std::error_code ec;
+
+			    fs::remove(
+			        entry.path(),
+			        ec
+			    );
+			}
 	    }
 	}
 }

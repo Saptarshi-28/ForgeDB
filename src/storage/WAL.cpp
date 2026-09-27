@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdexcept>
+#include <cerrno>
 
 namespace forgedb::storage{
 
@@ -59,12 +60,32 @@ namespace forgedb::storage{
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        if (ftruncate(fd_, 0) < 0) {
-            throw std::runtime_error("Failed to truncate WAL");
+        while (true) {
+            if (::ftruncate(fd_, 0) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            throw std::runtime_error(
+                "Failed to truncate WAL"
+            );
         }
 
-        if (fsync(fd_) < 0) {
-            throw std::runtime_error("Failed to sync WAL reset");
+        while (true) {
+            if (::fsync(fd_) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            throw std::runtime_error(
+                "Failed to sync WAL after reset"
+            );
         }
     }
 
@@ -91,12 +112,24 @@ namespace forgedb::storage{
             );
 
             if (bytes_written < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
                 throw std::runtime_error(
                     "Failed to write WAL"
                 );
             }
 
-            total_written += bytes_written;
+            if (bytes_written == 0) {
+                throw std::runtime_error(
+                    "WAL write made no progress"
+                );
+            }
+
+            total_written +=
+                static_cast<std::size_t>(bytes_written);
         }
     }
 
@@ -104,7 +137,16 @@ namespace forgedb::storage{
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        if (fsync(fd_) < 0) {
+        while (true) {
+
+            if (::fsync(fd_) == 0) {
+                return;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
             throw std::runtime_error(
                 "Failed to sync WAL"
             );

@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstdio>
+#include <cerrno>
 
 namespace forgedb::storage {
 
@@ -96,12 +97,29 @@ void BloomFilter::save(const std::string& filename) const
             );
 
             if (bytes_written < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                ::close(fd);
+
                 throw std::runtime_error(
-                    "Failed to write Bloom filter"
+                    "Failed to write file"
                 );
             }
 
-            total_written += bytes_written;
+            if (bytes_written == 0) {
+
+                ::close(fd);
+
+                throw std::runtime_error(
+                    "Write made no progress"
+                );
+            }
+
+            total_written +=
+                static_cast<std::size_t>(bytes_written);
         }
     };
 
@@ -132,9 +150,19 @@ void BloomFilter::save(const std::string& filename) const
             );
         }
 
-        if (fsync(fd) < 0) {
+        while (true) {
+            if (::fsync(fd) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            ::close(fd);
+
             throw std::runtime_error(
-                "Failed to sync Bloom filter"
+                "Failed to sync file"
             );
         }
     }
@@ -149,6 +177,10 @@ void BloomFilter::save(const std::string& filename) const
             temp_filename.c_str(),
             filename.c_str()
         ) != 0) {
+
+        std::remove(
+            temp_filename.c_str()
+        );
 
         throw std::runtime_error(
             "Failed to rename Bloom filter"
@@ -166,11 +198,19 @@ void BloomFilter::save(const std::string& filename) const
         );
     }
 
-    if (fsync(dir_fd) < 0) {
-        close(dir_fd);
+    while (true) {
+        if (::fsync(dir_fd) == 0) {
+            break;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        ::close(dir_fd);
 
         throw std::runtime_error(
-            "Failed to sync Bloom filter directory"
+            "Failed to sync directory"
         );
     }
 

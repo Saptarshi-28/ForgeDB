@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <algorithm>
+#include <cerrno>
 
 namespace forgedb::storage {
 
@@ -79,12 +80,29 @@ void SSTableIndex::save(
             );
 
             if (bytes_written < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                ::close(fd);
+
                 throw std::runtime_error(
-                    "Failed to write SSTable index"
+                    "Failed to write file"
                 );
             }
 
-            total_written += bytes_written;
+            if (bytes_written == 0) {
+
+                ::close(fd);
+
+                throw std::runtime_error(
+                    "Write made no progress"
+                );
+            }
+
+            total_written +=
+                static_cast<std::size_t>(bytes_written);
         }
     };
 
@@ -120,9 +138,19 @@ void SSTableIndex::save(
             );
         }
 
-        if (fsync(fd) < 0) {
+        while (true) {
+            if (::fsync(fd) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            ::close(fd);
+
             throw std::runtime_error(
-                "Failed to sync SSTable index"
+                "Failed to sync file"
             );
         }
     }
@@ -137,6 +165,10 @@ void SSTableIndex::save(
             temp_filename.c_str(),
             filename.c_str()
         ) != 0) {
+
+        std::remove(
+            temp_filename.c_str()
+        );
 
         throw std::runtime_error(
             "Failed to rename SSTable index"
@@ -154,11 +186,19 @@ void SSTableIndex::save(
         );
     }
 
-    if (fsync(dir_fd) < 0) {
-        close(dir_fd);
+    while (true) {
+        if (::fsync(dir_fd) == 0) {
+            break;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        ::close(dir_fd);
 
         throw std::runtime_error(
-            "Failed to sync SSTable index directory"
+            "Failed to sync directory"
         );
     }
 

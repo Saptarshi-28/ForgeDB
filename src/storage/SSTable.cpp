@@ -8,6 +8,7 @@
 #include "storage/BloomFilter.h"
 #include <algorithm>
 #include "storage/SSTableIndex.h"
+#include <cerrno>
 
 namespace forgedb::storage {
 
@@ -67,13 +68,29 @@ namespace forgedb::storage {
                 );
 
                 if (bytes_written < 0) {
-                    close(fd);
+
+                    if (errno == EINTR) {
+                        continue;
+                    }
+
+                    ::close(fd);
+
                     throw std::runtime_error(
                         "Failed to write SSTable"
                     );
                 }
 
-                total_written += bytes_written;
+                if (bytes_written == 0) {
+
+                    ::close(fd);
+
+                    throw std::runtime_error(
+                        "SSTable write made no progress"
+                    );
+                }
+
+                total_written +=
+                    static_cast<std::size_t>(bytes_written);
             }
 
             current_offset +=
@@ -82,8 +99,17 @@ namespace forgedb::storage {
             ++record_number;
         }
 
-        if (fsync(fd) < 0) {
-            close(fd);
+        while (true) {
+            if (::fsync(fd) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            ::close(fd);
+
             throw std::runtime_error(
                 "Failed to sync SSTable"
             );
@@ -91,10 +117,11 @@ namespace forgedb::storage {
 
         close(fd);
 
-        if (std::rename(
-                temp_filename.c_str(),
-                filename.c_str()
-            ) != 0) {
+        if (std::rename(temp_filename.c_str(),filename.c_str()) != 0) {
+
+            std::remove(
+                temp_filename.c_str()
+            );
 
             throw std::runtime_error(
                 "Failed to rename SSTable"
@@ -112,62 +139,80 @@ namespace forgedb::storage {
             );
         }
 
-        if (fsync(dir_fd) < 0) {
-            close(dir_fd);
+        while (true) {
+            if (::fsync(dir_fd) == 0) {
+                break;
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            ::close(dir_fd);
 
             throw std::runtime_error(
                 "Failed to sync SSTable directory"
             );
         }
-
         close(dir_fd);
 
         // Build Bloom filter only after the SSTable
         // has been successfully published.
-        std::size_t bloom_bit_count =
-            std::max<std::size_t>(
-                1024,
-                entries.size() * 10
+        try {
+            std::size_t bloom_bit_count =
+                std::max<std::size_t>(
+                    1024,
+                    entries.size() * 10
+                );
+
+            BloomFilter bloom(
+                bloom_bit_count,
+                7
             );
 
-        BloomFilter bloom(
-            bloom_bit_count,
-            7
-        );
+            for (const auto& entry : entries) {
+                bloom.add(entry.key);
+            }
 
-        for (const auto& entry : entries) {
-            bloom.add(entry.key);
+            std::string bloom_filename = filename;
+
+            if (bloom_filename.ends_with(".db")) {
+                bloom_filename.replace(
+                    bloom_filename.size() - 3,
+                    3,
+                    ".bf"
+                );
+            }
+            else {
+                bloom_filename += ".bf";
+            }
+
+            bloom.save(bloom_filename);
+        }
+        catch (...) {
+            // Bloom filter is only an optimization.
+            // The SSTable itself is already durable.
         }
 
-        std::string bloom_filename = filename;
+        try {
+            std::string index_filename = filename;
 
-        if (bloom_filename.ends_with(".db")) {
-            bloom_filename.replace(
-                bloom_filename.size() - 3,
-                3,
-                ".bf"
-            );
+            if (index_filename.ends_with(".db")) {
+                index_filename.replace(
+                    index_filename.size() - 3,
+                    3,
+                    ".idx"
+                );
+            }
+            else {
+                index_filename += ".idx";
+            }
+            index.save(index_filename);
         }
-        else {
-            bloom_filename += ".bf";
+        catch (...) {
+            // Sparse index is only an optimization.
+            // Lookups can safely scan from offset 0.
         }
-
-        bloom.save(bloom_filename);
-
-        std::string index_filename = filename;
-
-        if (index_filename.ends_with(".db")) {
-            index_filename.replace(
-                index_filename.size() - 3,
-                3,
-                ".idx"
-            );
-        }
-        else {
-            index_filename += ".idx";
-        }
-
-        index.save(index_filename);
     }
 
     std::string SSTable::get(
