@@ -53,14 +53,17 @@ namespace forgedb::network {
 
     Server::Server(
         int port,
+        NodeRole role,
         const std::string& replica_host,
         int replica_port
     )
         : port_(port),
+          role_(role),
           replica_host_(replica_host),
           replica_port_(replica_port)
     {
         replication_enabled_ =
+            role_ == NodeRole::LEADER &&
             !replica_host_.empty() &&
             replica_port_ > 0;
     }
@@ -160,6 +163,23 @@ namespace forgedb::network {
 
         std::cout << "ForgeDB server started on port " << port_ << std::endl;
 
+        std::cout
+            << "Node role: ";
+
+        if (role_ == NodeRole::LEADER) {
+            std::cout << "LEADER";
+        }
+        else if (
+            role_ == NodeRole::FOLLOWER
+        ) {
+            std::cout << "FOLLOWER";
+        }
+        else {
+            std::cout << "STANDALONE";
+        }
+
+        std::cout << "\n";
+
         if (replication_enabled_) {
 
             std::cout
@@ -180,8 +200,7 @@ namespace forgedb::network {
                     << "Replica connected\n";
 
                 if (!replayReplicationLog()) {
-                    std::cerr
-                        << "Initial replication catch-up failed\n";
+                    std::cerr<< "Initial replication catch-up failed\n";
                 }
             }
             else {
@@ -351,14 +370,41 @@ namespace forgedb::network {
         const std::string& command
     )
     {
-        if (command.rfind("REPL ",0) == 0) {
+        if (
+            command.rfind(
+                "REPL ",
+                0
+            ) == 0
+        ) {
+
+            if (
+                role_ !=
+                NodeRole::FOLLOWER
+            ) {
+
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    "REPL_ERR not follower\n"
+                };
+            }
 
             return processReplicationCommand(
                 client_fd,
                 command
             );
         }
+        if (
+            role_ == NodeRole::FOLLOWER &&
+            isMutationCommand(command)
+        ) {
 
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR read-only replica\n"
+            };
+        }
         forgedb::commands::CommandParser parser;
 
         auto parsed =
@@ -1092,12 +1138,10 @@ namespace forgedb::network {
         > entries;
 
         try {
-
             entries =
                 replication_log_.load();
         }
         catch (const std::exception& e) {
-
             std::cerr
                 << "Failed to load replication log: "
                 << e.what()
@@ -1106,10 +1150,7 @@ namespace forgedb::network {
             return false;
         }
 
-        for (
-            const auto& entry :
-            entries
-        ) {
+        for (const auto& entry : entries) {
 
             if (
                 entry.sequence <
@@ -1129,9 +1170,9 @@ namespace forgedb::network {
                     ReplicationStatus::
                         TRANSPORT_ERROR
             ) {
-
                 std::cerr
                     << "Replication transport failed "
+                    << "during startup catch-up "
                     << "for entry "
                     << entry.sequence
                     << "\n";
@@ -1145,11 +1186,10 @@ namespace forgedb::network {
                     ReplicationStatus::
                         REJECTED
             ) {
-
                 std::cerr
                     << "Follower rejected entry "
                     << entry.sequence
-                    << "\n";
+                    << " during startup catch-up\n";
 
                 return false;
             }

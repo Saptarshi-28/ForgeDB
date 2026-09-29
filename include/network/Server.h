@@ -20,11 +20,17 @@ namespace forgedb::network {
 		uint64_t generation;
     	std::string response;
 	};
+	enum class NodeRole {
+	    STANDALONE,
+	    LEADER,
+	    FOLLOWER
+	};
 
 	class Server {
 		public:
 			Server(
 			    int port = 6379,
+			    NodeRole role = NodeRole::STANDALONE,
 			    const std::string& replica_host = "",
 			    int replica_port = 0
 			);
@@ -34,6 +40,7 @@ namespace forgedb::network {
     		int port_;
 			int response_event_fd_ = -1;
 			uint64_t next_generation_ = 1;
+			NodeRole role_;
 
 			ClientResponse processCommand(int client_fd,const std::string& command);
 			void handleWrite(int epoll_fd, int client_fd);
