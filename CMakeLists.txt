@@ -22,6 +22,8 @@ add_executable(forgedb
         src/concurrency/ThreadPool.cpp
         src/storage/BloomFilter.cpp
         src/storage/SSTableIndex.cpp
+        src/replication/ReplicaClient.cpp
+        src/replication/ReplicationLog.cpp
 )
 
 add_executable(forge_benchmark

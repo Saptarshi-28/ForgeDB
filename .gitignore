@@ -10,3 +10,5 @@ sstable_*.bf.tmp
 sstable_*.idx
 sstable_*.idx.tmp
 compaction_*.db
+runtime/
+replication_test.log

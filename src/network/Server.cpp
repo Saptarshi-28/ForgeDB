@@ -13,11 +13,69 @@
 #include <sys/eventfd.h>
 #include <netinet/tcp.h>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <filesystem>
+#include <fstream>
+#include <cstdio>
 
+namespace {
+
+bool isMutationCommand(
+    const std::string& command
+)
+{
+    std::istringstream stream(command);
+
+    std::string operation;
+
+    stream >> operation;
+
+    std::transform(
+        operation.begin(),
+        operation.end(),
+        operation.begin(),
+        [](unsigned char character) {
+            return static_cast<char>(
+                std::toupper(character)
+            );
+        }
+    );
+
+    return
+        operation == "SET" ||
+        operation == "DELETE";
+}
+
+}
 namespace forgedb::network {
+
+    Server::Server(
+        int port,
+        const std::string& replica_host,
+        int replica_port
+    )
+        : port_(port),
+          replica_host_(replica_host),
+          replica_port_(replica_port)
+    {
+        replication_enabled_ =
+            !replica_host_.empty() &&
+            replica_port_ > 0;
+    }
 
     void Server::start()
     {
+        if (!loadReplicationState()) {
+
+            std::cerr
+                << "Failed to load "
+                << "replication state\n";
+
+            return;
+        }
+
         int server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
         if (server_fd < 0) {
@@ -36,7 +94,7 @@ namespace forgedb::network {
         sockaddr_in server_address{};
         server_address.sin_family = AF_INET;
         server_address.sin_addr.s_addr = INADDR_ANY;
-        server_address.sin_port = htons(PORT);
+        server_address.sin_port = htons(port_);
 
         if (bind(server_fd,reinterpret_cast<sockaddr*>(&server_address),sizeof(server_address)) < 0) {
 
@@ -100,7 +158,38 @@ namespace forgedb::network {
 
         epoll_event events[10];
 
-        std::cout << "ForgeDB server started on port " << PORT << std::endl;
+        std::cout << "ForgeDB server started on port " << port_ << std::endl;
+
+        if (replication_enabled_) {
+
+            std::cout
+                << "Connecting to replica "
+                << replica_host_
+                << ":"
+                << replica_port_
+                << "...\n";
+
+            if (
+                replica_client_.connectTo(
+                    replica_host_,
+                    replica_port_
+                )
+            ) {
+
+                std::cout
+                    << "Replica connected\n";
+
+                if (!replayReplicationLog()) {
+                    std::cerr
+                        << "Initial replication catch-up failed\n";
+                }
+            }
+            else {
+
+                std::cerr
+                    << "Warning: replica unavailable\n";
+            }
+        }
 
         while (true) {
 
@@ -257,20 +346,221 @@ namespace forgedb::network {
         close(server_fd);
     }
 
-    ClientResponse Server::processCommand(int client_fd,const std::string& command)
+    ClientResponse Server::processCommand(
+        int client_fd,
+        const std::string& command
+    )
     {
+        if (command.rfind("REPL ",0) == 0) {
+
+            return processReplicationCommand(
+                client_fd,
+                command
+            );
+        }
+
         forgedb::commands::CommandParser parser;
 
-        auto parsed = parser.parse(command);
+        auto parsed =
+            parser.parse(command);
 
-        std::string response = commandHandler_.execute(parsed);
+        std::string response =
+            commandHandler_.execute(parsed);
+
+        bool successful =
+            response.rfind(
+                "ERR",
+                0
+            ) != 0;
+
+        if (
+            replication_enabled_ &&
+            successful &&
+            isMutationCommand(command)
+        ) {
+
+            if (
+                !replicateWithReconnect(
+                    command
+                )
+            ) {
+
+                std::cerr
+                    << "Replication unavailable for: "
+                    << command
+                    << "\n";
+            }
+        }
 
         return ClientResponse{
             client_fd,
-            0, // generation will be set later
+            0,
             response
         };
     }
+
+    ClientResponse Server::processReplicationCommand(
+        int client_fd,
+        const std::string& command
+    )
+    {
+        std::istringstream stream(
+            command
+        );
+
+        std::string marker;
+        uint64_t sequence = 0;
+
+        stream >> marker;
+        stream >> sequence;
+
+        if (
+            marker != "REPL" ||
+            stream.fail()
+        ) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "REPL_ERR invalid request\n"
+            };
+        }
+
+        std::string replicated_command;
+
+        std::getline(
+            stream,
+            replicated_command
+        );
+
+        if (
+            !replicated_command.empty() &&
+            replicated_command.front() == ' '
+        ) {
+
+            replicated_command.erase(
+                0,
+                1
+            );
+        }
+
+        if (
+            replicated_command.empty() ||
+            !isMutationCommand(
+                replicated_command
+            )
+        ) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "REPL_ERR invalid mutation\n"
+            };
+        }
+
+        std::lock_guard<std::mutex> lock(
+            replicaApplyMutex_
+        );
+
+        /*
+         * Already applied.
+         *
+         * This can happen if the leader sent
+         * an entry successfully but lost the
+         * acknowledgement and retried it.
+         */
+        if (
+            sequence <=
+            last_applied_replication_sequence_
+        ) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "REPL_OK " +
+                    std::to_string(sequence) +
+                    "\n"
+            };
+        }
+
+        uint64_t expected_sequence =
+            last_applied_replication_sequence_ +
+            1;
+
+        /*
+         * Missing one or more entries.
+         */
+        if (
+            sequence !=
+            expected_sequence
+        ) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "REPL_ERR gap expected=" +
+                    std::to_string(
+                        expected_sequence
+                    ) +
+                    " got=" +
+                    std::to_string(
+                        sequence
+                    ) +
+                    "\n"
+            };
+        }
+
+        forgedb::commands::CommandParser parser;
+
+        auto parsed =
+            parser.parse(
+                replicated_command
+            );
+
+        std::string response =
+            commandHandler_.execute(
+                parsed
+            );
+
+        if (
+            response.rfind(
+                "ERR",
+                0
+            ) == 0
+        ) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "REPL_ERR apply failed\n"
+            };
+        }
+
+        if (
+            !persistReplicationState(
+                sequence
+            )
+        ) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "REPL_ERR persistence failed\n"
+            };
+        }
+
+        last_applied_replication_sequence_ =
+            sequence;
+
+        return ClientResponse{
+            client_fd,
+            0,
+            "REPL_OK " +
+                std::to_string(sequence) +
+                "\n"
+        };
+    }
+
     void Server::handleWrite(int epoll_fd, int client_fd)
     {
         auto it = clients_.find(client_fd);
@@ -412,5 +702,467 @@ namespace forgedb::network {
                 }
             }
         });
+    }
+    bool Server::replicateWithReconnect(
+        const std::string& command
+    )
+    {
+        std::lock_guard<std::mutex> lock(
+            replicationMutex_
+        );
+
+        if (!replication_enabled_) {
+            return true;
+        }
+
+        forgedb::replication::ReplicationEntry
+            new_entry;
+
+        try {
+
+            new_entry =
+                replication_log_.append(
+                    command
+                );
+        }
+        catch (
+            const std::exception& e
+        ) {
+
+            std::cerr
+                << "Failed to append "
+                << "replication log: "
+                << e.what()
+                << "\n";
+
+            return false;
+        }
+
+        std::cout
+            << "Created replication entry "
+            << new_entry.sequence
+            << "\n";
+
+        std::vector<
+            forgedb::replication::ReplicationEntry
+        > entries;
+
+        try {
+
+            entries =
+                replication_log_.load();
+        }
+        catch (
+            const std::exception& e
+        ) {
+
+            std::cerr
+                << "Failed to load "
+                << "replication log: "
+                << e.what()
+                << "\n";
+
+            return false;
+        }
+
+        for (
+            const auto& entry :
+            entries
+        ) {
+
+            /*
+             * Entries below this cursor were
+             * already acknowledged during this
+             * leader process lifetime.
+             */
+            if (
+                entry.sequence <
+                next_replication_to_send_
+            ) {
+                continue;
+            }
+
+            auto sendEntry =
+                [this, &entry]()
+                    -> forgedb::replication::
+                        ReplicationStatus {
+
+                return replica_client_
+                    .replicateEntry(
+                        entry
+                    );
+            };
+
+            auto status =
+                sendEntry();
+
+            /*
+             * Transport failure:
+             * reconnect once and retry the
+             * same exact sequence number.
+             */
+            if (
+                status ==
+                forgedb::replication::
+                    ReplicationStatus::
+                        TRANSPORT_ERROR
+            ) {
+
+                std::cerr
+                    << "Replica disconnected. "
+                    << "Attempting reconnect...\n";
+
+                if (
+                    !replica_client_.connectTo(
+                        replica_host_,
+                        replica_port_
+                    )
+                ) {
+
+                    std::cerr
+                        << "Replica reconnect failed\n";
+
+                    return false;
+                }
+
+                std::cout
+                    << "Replica reconnected\n";
+
+                status =
+                    sendEntry();
+            }
+
+            if (
+                status ==
+                forgedb::replication::
+                    ReplicationStatus::
+                        TRANSPORT_ERROR
+            ) {
+
+                std::cerr
+                    << "Replication transport "
+                    << "failed for entry "
+                    << entry.sequence
+                    << "\n";
+
+                return false;
+            }
+
+            if (
+                status ==
+                forgedb::replication::
+                    ReplicationStatus::
+                        REJECTED
+            ) {
+
+                std::cerr
+                    << "Follower rejected "
+                    << "replication entry "
+                    << entry.sequence
+                    << "\n";
+
+                return false;
+            }
+
+            std::cout
+                << "Replication entry "
+                << entry.sequence
+                << " acknowledged\n";
+
+            next_replication_to_send_ =
+                entry.sequence + 1;
+        }
+
+        return true;
+    }
+
+    bool Server::loadReplicationState()
+    {
+        constexpr const char* STATE_FILE =
+            "replication.meta";
+
+        if (
+            !std::filesystem::exists(
+                STATE_FILE
+            )
+        ) {
+
+            last_applied_replication_sequence_ = 0;
+
+            return true;
+        }
+
+        std::ifstream file(
+            STATE_FILE
+        );
+
+        if (!file.is_open()) {
+
+            std::cerr
+                << "Failed to open replication state\n";
+
+            return false;
+        }
+
+        uint64_t sequence = 0;
+
+        file >> sequence;
+
+        if (file.fail()) {
+
+            std::cerr
+                << "Invalid replication state\n";
+
+            return false;
+        }
+
+        last_applied_replication_sequence_ =
+            sequence;
+
+        std::cout
+            << "Loaded replication sequence "
+            << sequence
+            << "\n";
+
+        return true;
+    }
+    bool Server::persistReplicationState(
+        uint64_t sequence
+    )
+    {
+        constexpr const char* STATE_FILE =
+            "replication.meta";
+
+        constexpr const char* TEMP_FILE =
+            "replication.meta.tmp";
+
+        std::string data =
+            std::to_string(sequence) +
+            "\n";
+
+        int fd = open(
+            TEMP_FILE,
+            O_WRONLY |
+            O_CREAT |
+            O_TRUNC,
+            0644
+        );
+
+        if (fd < 0) {
+
+            std::cerr
+                << "Failed to open replication "
+                << "state temp file\n";
+
+            return false;
+        }
+
+        std::size_t total_written = 0;
+
+        while (
+            total_written <
+            data.size()
+        ) {
+
+            ssize_t written = write(
+                fd,
+                data.data() +
+                    total_written,
+                data.size() -
+                    total_written
+            );
+
+            if (written < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                std::cerr
+                    << "Failed to write "
+                    << "replication state\n";
+
+                close(fd);
+                unlink(TEMP_FILE);
+
+                return false;
+            }
+
+            if (written == 0) {
+
+                std::cerr
+                    << "Replication state write "
+                    << "made no progress\n";
+
+                close(fd);
+                unlink(TEMP_FILE);
+
+                return false;
+            }
+
+            total_written +=
+                static_cast<std::size_t>(
+                    written
+                );
+        }
+
+        while (fsync(fd) < 0) {
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            std::cerr
+                << "Failed to sync "
+                << "replication state\n";
+
+            close(fd);
+            unlink(TEMP_FILE);
+
+            return false;
+        }
+
+        close(fd);
+
+        if (
+            std::rename(
+                TEMP_FILE,
+                STATE_FILE
+            ) != 0
+        ) {
+
+            std::cerr
+                << "Failed to publish "
+                << "replication state\n";
+
+            unlink(TEMP_FILE);
+
+            return false;
+        }
+
+        int directory_fd = open(
+            ".",
+            O_RDONLY |
+            O_DIRECTORY
+        );
+
+        if (directory_fd < 0) {
+
+            std::cerr
+                << "Failed to open database "
+                << "directory\n";
+
+            return false;
+        }
+
+        while (
+            fsync(directory_fd) < 0
+        ) {
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            std::cerr
+                << "Failed to sync database "
+                << "directory\n";
+
+            close(directory_fd);
+
+            return false;
+        }
+
+        close(directory_fd);
+
+        return true;
+    }
+
+    bool Server::replayReplicationLog()
+    {
+        std::lock_guard<std::mutex> lock(
+            replicationMutex_
+        );
+
+        if (!replication_enabled_) {
+            return true;
+        }
+
+        std::vector<
+            forgedb::replication::ReplicationEntry
+        > entries;
+
+        try {
+
+            entries =
+                replication_log_.load();
+        }
+        catch (const std::exception& e) {
+
+            std::cerr
+                << "Failed to load replication log: "
+                << e.what()
+                << "\n";
+
+            return false;
+        }
+
+        for (
+            const auto& entry :
+            entries
+        ) {
+
+            if (
+                entry.sequence <
+                next_replication_to_send_
+            ) {
+                continue;
+            }
+
+            auto status =
+                replica_client_.replicateEntry(
+                    entry
+                );
+
+            if (
+                status ==
+                forgedb::replication::
+                    ReplicationStatus::
+                        TRANSPORT_ERROR
+            ) {
+
+                std::cerr
+                    << "Replication transport failed "
+                    << "for entry "
+                    << entry.sequence
+                    << "\n";
+
+                return false;
+            }
+
+            if (
+                status ==
+                forgedb::replication::
+                    ReplicationStatus::
+                        REJECTED
+            ) {
+
+                std::cerr
+                    << "Follower rejected entry "
+                    << entry.sequence
+                    << "\n";
+
+                return false;
+            }
+
+            std::cout
+                << "Replication entry "
+                << entry.sequence
+                << " acknowledged\n";
+
+            next_replication_to_send_ =
+                entry.sequence + 1;
+        }
+
+        return true;
     }
 }
