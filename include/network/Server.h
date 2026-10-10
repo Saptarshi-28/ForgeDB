@@ -12,6 +12,13 @@
 #include "replication/ReplicaClient.h"
 #include "replication/ReplicationEntry.h"
 #include "replication/ReplicationLog.h"
+#include "raft/RaftState.h"
+#include "raft/RaftLog.h"
+#include "raft/RaftProtocol.h"
+#include "raft/RaftPeer.h"
+#include "raft/RaftElection.h"
+#include "raft/ElectionTimer.h"
+#include <chrono>
 
 namespace forgedb::network {
 
@@ -23,16 +30,19 @@ namespace forgedb::network {
 	enum class NodeRole {
 	    STANDALONE,
 	    LEADER,
-	    FOLLOWER
+	    FOLLOWER,
+	    RAFT
 	};
 
 	class Server {
 		public:
 			Server(
-			    int port = 6379,
-			    NodeRole role = NodeRole::STANDALONE,
+			    int port,
+			    const std::string& node_id,
+			    NodeRole role,
 			    const std::string& replica_host = "",
-			    int replica_port = 0
+			    int replica_port = 0,
+				const std::vector<forgedb::raft::RaftPeer>& raft_peers = {}
 			);
     		void start();
 
@@ -41,6 +51,7 @@ namespace forgedb::network {
 			int response_event_fd_ = -1;
 			uint64_t next_generation_ = 1;
 			NodeRole role_;
+			std::vector<forgedb::raft::RaftPeer> raft_peers_;
 
 			ClientResponse processCommand(int client_fd,const std::string& command);
 			void handleWrite(int epoll_fd, int client_fd);
@@ -52,6 +63,8 @@ namespace forgedb::network {
 			bool loadReplicationState();
 			bool persistReplicationState(uint64_t sequence);
 			bool replayReplicationLog();
+			ClientResponse processRaftVoteRequest(int client_fd,const std::string& command);
+			ClientResponse processRaftAppendRequest(int client_fd,const std::string& command);
 
 			forgedb::storage::KeyValueStore store_{"forge.wal"};
 			forgedb::commands::CommandHandler commandHandler_{store_};
@@ -77,5 +90,17 @@ namespace forgedb::network {
 			forgedb::replication::ReplicationLog replication_log_{"replication.log"};
 
 			uint64_t next_replication_to_send_ = 1;
+
+			std::string node_id_;
+
+			forgedb::raft::RaftState raft_state_;
+
+			forgedb::raft::RaftLog raft_log_;
+
+			forgedb::raft::ElectionTimer election_timer_{
+			    std::chrono::milliseconds{1200},
+			    std::chrono::milliseconds{2000}
+			};
+
 	};
 }

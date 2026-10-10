@@ -1,5 +1,5 @@
 #pragma once
-
+#include "raft/RaftMessages.h"
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -26,6 +26,11 @@ public:
     std::string votedFor() const;
 
     RaftRole role() const;
+    uint64_t startElection();
+
+    bool observeLeader(
+        uint64_t leader_term
+    );
 
     void setRole(
         RaftRole role
@@ -37,6 +42,11 @@ public:
 
     bool recordVote(
         const std::string& candidate_id
+    );
+    RequestVoteResponse handleRequestVote(
+        const RequestVoteRequest& request,
+        uint64_t local_last_log_index,
+        uint64_t local_last_log_term
     );
 
 private:

@@ -1,5 +1,5 @@
 #include "raft/RaftState.h"
-
+#include <limits>
 #include <cerrno>
 #include <fcntl.h>
 #include <fstream>
@@ -297,4 +297,194 @@ void RaftState::persist() const
     close(directory_fd);
 }
 
+bool RaftState::observeLeader(
+    uint64_t leader_term
+)
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    /*
+     * A leader from an older term
+     * cannot be accepted.
+     */
+    if (
+        leader_term <
+        current_term_
+    ) {
+        return false;
+    }
+
+    /*
+     * Discovering a newer term means
+     * our term/vote state is obsolete.
+     */
+    if (
+        leader_term >
+        current_term_
+    ) {
+        current_term_ =
+            leader_term;
+
+        voted_for_.clear();
+
+        /*
+         * Term and vote must become
+         * durable before acknowledging
+         * the newer leader.
+         */
+        persist();
+    }
+
+    /*
+     * Even if terms are equal, a
+     * candidate receiving AppendEntries
+     * from the elected leader steps down.
+     */
+    role_ =
+        RaftRole::FOLLOWER;
+
+    return true;
+}
+
+RequestVoteResponse RaftState::handleRequestVote(
+    const RequestVoteRequest& request,
+    uint64_t local_last_log_index,
+    uint64_t local_last_log_term
+)
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    // Reject invalid voting requests.
+    if (
+        request.term == 0 ||
+        request.candidate_id.empty()
+    ) {
+        return {
+            current_term_,
+            false
+        };
+    }
+
+    /*
+     * A higher term means our information
+     * is outdated.
+     */
+    if (request.term > current_term_) {
+
+        current_term_ = request.term;
+
+        voted_for_.clear();
+
+        role_ = RaftRole::FOLLOWER;
+
+        // Persist the new term before replying.
+        persist();
+    }
+
+    /*
+     * Reject candidates from older terms.
+     */
+    if (request.term < current_term_) {
+
+        return {
+            current_term_,
+            false
+        };
+    }
+
+    /*
+     * Compare log freshness.
+     *
+     * Higher last-log term wins.
+     * If terms match, compare log indexes.
+     */
+    bool log_up_to_date =
+        request.last_log_term >
+            local_last_log_term
+        ||
+        (
+            request.last_log_term ==
+                local_last_log_term
+            &&
+            request.last_log_index >=
+                local_last_log_index
+        );
+
+    if (!log_up_to_date) {
+
+        return {
+            current_term_,
+            false
+        };
+    }
+
+    /*
+     * One vote per term.
+     *
+     * Voting again for the SAME candidate
+     * is allowed.
+     */
+    if (
+        !voted_for_.empty() &&
+        voted_for_ != request.candidate_id
+    ) {
+
+        return {
+            current_term_,
+            false
+        };
+    }
+
+    /*
+     * Record and persist our vote.
+     */
+    if (voted_for_.empty()) {
+
+        voted_for_ =
+            request.candidate_id;
+
+        persist();
+    }
+
+    return {
+        current_term_,
+        true
+    };
+}
+uint64_t RaftState::startElection()
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    if (
+        current_term_ ==
+        std::numeric_limits<uint64_t>::max()
+    ) {
+
+        throw std::runtime_error(
+            "Raft term overflow"
+        );
+    }
+
+    ++current_term_;
+
+    role_ =
+        RaftRole::CANDIDATE;
+
+    /*
+     * Every candidate votes for itself
+     * when beginning a new election.
+     */
+    voted_for_ =
+        node_id_;
+
+    persist();
+
+    return current_term_;
+}
 }

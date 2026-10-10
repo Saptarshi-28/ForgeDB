@@ -53,14 +53,25 @@ namespace forgedb::network {
 
     Server::Server(
         int port,
+        const std::string& node_id,
         NodeRole role,
         const std::string& replica_host,
-        int replica_port
+        int replica_port,
+        const std::vector<forgedb::raft::RaftPeer>& raft_peers
     )
         : port_(port),
+          node_id_(node_id),
           role_(role),
           replica_host_(replica_host),
-          replica_port_(replica_port)
+          replica_port_(replica_port),
+          raft_state_(
+              node_id,
+              "raft.meta"
+          ),
+          raft_log_(
+              "raft.log"
+          ),
+          raft_peers_(raft_peers)
     {
         replication_enabled_ =
             role_ == NodeRole::LEADER &&
@@ -162,6 +173,15 @@ namespace forgedb::network {
         epoll_event events[10];
 
         std::cout << "ForgeDB server started on port " << port_ << std::endl;
+        std::cout
+            << "Node ID: "
+            << node_id_
+            << "\n";
+
+        std::cout
+            << "Raft term: "
+            << raft_state_.currentTerm()
+            << "\n";
 
         std::cout
             << "Node role: ";
@@ -174,11 +194,40 @@ namespace forgedb::network {
         ) {
             std::cout << "FOLLOWER";
         }
+        else if (
+            role_ == NodeRole::RAFT
+        ) {
+            std::cout << "RAFT";
+        }
         else {
             std::cout << "STANDALONE";
         }
-
         std::cout << "\n";
+
+        if (
+            role_ == NodeRole::RAFT
+        )
+        {
+            std::cout
+                << "Raft peers: "
+                << raft_peers_.size()
+                << "\n";
+
+            for (
+                const auto& peer :
+                raft_peers_
+            )
+            {
+                std::cout
+                    << "  "
+                    << peer.node_id
+                    << " -> "
+                    << peer.host
+                    << ":"
+                    << peer.port
+                    << "\n";
+            }
+        }
 
         if (replication_enabled_) {
 
@@ -372,6 +421,18 @@ namespace forgedb::network {
     {
         if (
             command.rfind(
+                "RAFT_VOTE ",
+                0
+            ) == 0
+        ) {
+
+            return processRaftVoteRequest(
+                client_fd,
+                command
+            );
+        }
+        if (
+            command.rfind(
                 "REPL ",
                 0
             ) == 0
@@ -405,10 +466,31 @@ namespace forgedb::network {
                 "ERR read-only replica\n"
             };
         }
+        if (
+            role_ == NodeRole::RAFT &&
+            isMutationCommand(command)
+        ) {
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR Raft writes not enabled yet\n"
+            };
+        }
+        if (
+            command == "RAFT_APPEND" ||
+            command.rfind(
+                "RAFT_APPEND ",
+                0
+            ) == 0
+        ) {
+            return processRaftAppendRequest(
+                client_fd,
+                command
+            );
+        }
         forgedb::commands::CommandParser parser;
 
-        auto parsed =
-            parser.parse(command);
+        auto parsed = parser.parse(command);
 
         std::string response =
             commandHandler_.execute(parsed);
@@ -442,6 +524,84 @@ namespace forgedb::network {
             client_fd,
             0,
             response
+        };
+    }
+
+    ClientResponse Server::processRaftVoteRequest(
+        int client_fd,
+        const std::string& command
+    )
+    {
+        auto request =
+            forgedb::raft::
+                decodeRequestVote(
+                    command
+                );
+
+        if (!request.has_value()) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR invalid Raft vote request\n"
+            };
+        }
+
+        auto [
+            local_last_log_index,
+            local_last_log_term
+        ] =
+            raft_log_.lastLogInfo();
+
+        forgedb::raft::
+            RequestVoteResponse response;
+
+        try {
+
+            response =
+                raft_state_.handleRequestVote(
+                    *request,
+                    local_last_log_index,
+                    local_last_log_term
+                );
+            if (
+                response.vote_granted
+            )
+            {
+                election_timer_.reset();
+
+                std::cout
+                    << "Election timer reset after "
+                    << "granting vote to "
+                    << request->candidate_id
+                    << " in term "
+                    << request->term
+                    << "\n";
+            }
+        }
+        catch (
+            const std::exception& e
+        ) {
+
+            std::cerr
+                << "RequestVote processing failed: "
+                << e.what()
+                << "\n";
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR Raft persistence failure\n"
+            };
+        }
+
+        return ClientResponse{
+            client_fd,
+            0,
+            forgedb::raft::
+                encodeRequestVoteResponse(
+                    response
+                )
         };
     }
 
@@ -1204,5 +1364,136 @@ namespace forgedb::network {
         }
 
         return true;
+    }
+
+    ClientResponse
+    Server::processRaftAppendRequest(
+        int client_fd,
+        const std::string& command
+    )
+    {
+        auto request =
+            forgedb::raft::
+                decodeAppendEntries(
+                    command
+                );
+
+        if (!request.has_value()) {
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR invalid Raft AppendEntries request\n"
+            };
+        }
+
+        try {
+
+            /*
+             * First deal with the term.
+             *
+             * This is done BEFORE checking
+             * log consistency because a
+             * valid leader in our term still
+             * causes a candidate to step down.
+             */
+            if (
+                !raft_state_.observeLeader(
+                    request->term
+                )
+            ) {
+
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    forgedb::raft::
+                        encodeAppendEntriesResponse({
+                            raft_state_.currentTerm(),
+                            false
+                        })
+                };
+            }
+
+            /*
+             * The sender is a legitimate leader for
+             * our current term or a newer term.
+             *
+             * Reset BEFORE checking prevLogIndex /
+             * prevLogTerm.
+             *
+             * Even if the log check fails, we still
+             * heard from the current leader and must
+             * not start an election.
+             */
+            election_timer_.reset();
+
+            std::cout
+                << "Election timer reset by leader "
+                << request->leader_id
+                << " in term "
+                << request->term
+                << "\n";
+
+            /*
+             * Raft log consistency check:
+             *
+             * Does our entry at prev_log_index
+             * have prev_log_term?
+             */
+            auto local_term =
+                raft_log_.termAt(
+                    request->prev_log_index
+                );
+
+            if (
+                !local_term.has_value() ||
+                *local_term !=
+                    request->prev_log_term
+            ) {
+
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    forgedb::raft::
+                        encodeAppendEntriesResponse({
+                            raft_state_.currentTerm(),
+                            false
+                        })
+                };
+            }
+
+            /*
+             * For now this is heartbeat-only.
+             *
+             * There are no new entries to
+             * append yet, and leader_commit
+             * will be handled when commitIndex
+             * is introduced.
+             */
+            return ClientResponse{
+                client_fd,
+                0,
+                forgedb::raft::
+                    encodeAppendEntriesResponse({
+                        raft_state_.currentTerm(),
+                        true
+                    })
+            };
+        }
+        catch (
+            const std::exception& e
+        ) {
+
+            std::cerr
+                << "AppendEntries processing failed: "
+                << e.what()
+                << "\n";
+
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR Raft persistence failure\n"
+            };
+        }
     }
 }

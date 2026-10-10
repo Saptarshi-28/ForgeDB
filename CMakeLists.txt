@@ -24,6 +24,12 @@ add_executable(forgedb
         src/storage/SSTableIndex.cpp
         src/replication/ReplicaClient.cpp
         src/replication/ReplicationLog.cpp
+        src/raft/RaftState.cpp
+        src/raft/RaftLog.cpp
+        src/raft/RaftProtocol.cpp
+        src/raft/RaftClient.cpp
+        src/raft/RaftElection.cpp
+        src/raft/ElectionTimer.cpp
 )
 
 add_executable(forge_benchmark
