@@ -71,7 +71,23 @@ namespace forgedb::network {
           raft_log_(
               "raft.log"
           ),
-          raft_peers_(raft_peers)
+          raft_peers_(raft_peers),
+          raft_election_loop_(
+              node_id_,
+              raft_state_,
+              raft_log_,
+              raft_peers_,
+              election_timer_,
+              std::chrono::milliseconds{50}
+          ),
+
+          raft_heartbeat_loop_(
+              node_id_,
+              raft_state_,
+              raft_log_,
+              raft_peers_,
+              std::chrono::milliseconds{250}
+          )
     {
         replication_enabled_ =
             role_ == NodeRole::LEADER &&
@@ -259,6 +275,25 @@ namespace forgedb::network {
             }
         }
 
+        if (
+            role_ == NodeRole::RAFT
+        )
+        {
+            /*
+             * Heartbeat loop starts first.
+             *
+             * It does nothing until this node
+             * actually becomes Raft leader.
+             */
+            raft_heartbeat_loop_.start();
+
+            raft_election_loop_.start();
+
+            std::cout
+                << "Raft election and heartbeat "
+                << "loops started\n";
+        }
+
         while (true) {
 
             int event_count = epoll_wait(epoll_fd,events,10,-1);
@@ -409,6 +444,15 @@ namespace forgedb::network {
                     }
                 }
             }
+        }
+
+        if (
+            role_ == NodeRole::RAFT
+        )
+        {
+            raft_election_loop_.stop();
+
+            raft_heartbeat_loop_.stop();
         }
 
         close(server_fd);

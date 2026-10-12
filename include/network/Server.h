@@ -19,6 +19,9 @@
 #include "raft/RaftElection.h"
 #include "raft/ElectionTimer.h"
 #include <chrono>
+#include "raft/RaftElectionLoop.h"
+#include "raft/RaftHeartbeatLoop.h"
+#include <vector>
 
 namespace forgedb::network {
 
@@ -51,7 +54,6 @@ namespace forgedb::network {
 			int response_event_fd_ = -1;
 			uint64_t next_generation_ = 1;
 			NodeRole role_;
-			std::vector<forgedb::raft::RaftPeer> raft_peers_;
 
 			ClientResponse processCommand(int client_fd,const std::string& command);
 			void handleWrite(int epoll_fd, int client_fd);
@@ -97,10 +99,17 @@ namespace forgedb::network {
 
 			forgedb::raft::RaftLog raft_log_;
 
+			std::vector<
+			    forgedb::raft::RaftPeer
+			> raft_peers_;
+
 			forgedb::raft::ElectionTimer election_timer_{
 			    std::chrono::milliseconds{1200},
 			    std::chrono::milliseconds{2000}
 			};
+
+			forgedb::raft::RaftElectionLoop raft_election_loop_;
+			forgedb::raft::RaftHeartbeatLoop raft_heartbeat_loop_;
 
 	};
 }
