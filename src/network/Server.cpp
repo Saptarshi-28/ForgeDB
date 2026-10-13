@@ -72,6 +72,10 @@ namespace forgedb::network {
               "raft.log"
           ),
           raft_peers_(raft_peers),
+
+          raft_leader_progress_(
+              raft_peers_
+          ),
           raft_election_loop_(
               node_id_,
               raft_state_,
@@ -80,12 +84,12 @@ namespace forgedb::network {
               election_timer_,
               std::chrono::milliseconds{50}
           ),
-
           raft_heartbeat_loop_(
               node_id_,
               raft_state_,
               raft_log_,
               raft_peers_,
+              raft_leader_progress_,
               std::chrono::milliseconds{250}
           )
     {
@@ -1507,12 +1511,42 @@ namespace forgedb::network {
             }
 
             /*
-             * For now this is heartbeat-only.
+             * The prefix matched.
              *
-             * There are no new entries to
-             * append yet, and leader_commit
-             * will be handled when commitIndex
-             * is introduced.
+             * The follower can now reconcile
+             * any entries supplied by the leader.
+             *
+             * Empty entries simply mean that
+             * this RPC was a heartbeat.
+             */
+            raft_log_.appendFromLeader(
+                request->entries
+            );
+
+            if (
+                !request->entries.empty()
+            ) {
+                std::cout
+                    << "Accepted "
+                    << request->entries.size()
+                    << " Raft log entr"
+                    << (
+                        request->entries.size() == 1
+                            ? "y"
+                            : "ies"
+                    )
+                    << " from leader "
+                    << request->leader_id
+                    << "\n";
+            }
+
+            /*
+             * leader_commit is intentionally
+             * not processed yet.
+             *
+             * At this stage we persist log
+             * entries but do NOT apply them
+             * to KeyValueStore.
              */
             return ClientResponse{
                 client_fd,

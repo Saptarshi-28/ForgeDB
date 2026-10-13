@@ -1,5 +1,5 @@
 #include "raft/RaftHeartbeat.h"
-
+#include "raft/RaftLeaderProgress.h"
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -67,11 +67,20 @@ int main()
         }
     };
 
+    RaftLeaderProgress progress(peers);
+    const auto last_log =
+        log.lastLogInfo();
+
+    progress.reset(
+        last_log.first
+    );
+
     RaftHeartbeat heartbeat(
         "node1",
         state,
         log,
-        peers
+        peers,
+        progress
     );
 
     auto result =

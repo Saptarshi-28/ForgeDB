@@ -22,6 +22,183 @@ struct ParsedLog {
     std::size_t complete_bytes = 0;
     std::size_t total_bytes = 0;
 };
+void syncDirectory(
+    const std::string& filename
+)
+{
+    auto directory =
+        std::filesystem::path(filename)
+            .parent_path();
+
+    if (directory.empty()) {
+        directory = ".";
+    }
+
+    int fd = open(
+        directory.c_str(),
+        O_RDONLY | O_DIRECTORY
+    );
+
+    if (fd < 0) {
+        throw std::runtime_error(
+            "Failed to open Raft log directory"
+        );
+    }
+
+    while (fsync(fd) < 0) {
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        close(fd);
+
+        throw std::runtime_error(
+            "Failed to sync Raft log directory"
+        );
+    }
+
+    if (close(fd) < 0) {
+        throw std::runtime_error(
+            "Failed to close Raft log directory"
+        );
+    }
+}
+void rewriteLogFile(
+    const std::string& filename,
+    const std::vector<RaftLogEntry>& entries
+)
+{
+    const std::string temp_filename =
+        filename + ".tmp";
+
+    int fd = open(
+        temp_filename.c_str(),
+        O_WRONLY |
+        O_CREAT |
+        O_TRUNC,
+        0644
+    );
+
+    if (fd < 0) {
+        throw std::runtime_error(
+            "Failed to open Raft log temp file"
+        );
+    }
+
+    auto closeAndRemove =
+        [&]() {
+            close(fd);
+
+            unlink(
+                temp_filename.c_str()
+            );
+        };
+
+    for (
+        const auto& entry :
+        entries
+    ) {
+        std::string record =
+            std::to_string(entry.index) +
+            "\t" +
+            std::to_string(entry.term) +
+            "\t" +
+            entry.command +
+            "\n";
+
+        std::size_t total_written = 0;
+
+        while (
+            total_written <
+            record.size()
+        ) {
+            ssize_t written =
+                write(
+                    fd,
+                    record.data() +
+                        total_written,
+                    record.size() -
+                        total_written
+                );
+
+            if (written < 0) {
+
+                if (errno == EINTR) {
+                    continue;
+                }
+
+                closeAndRemove();
+
+                throw std::runtime_error(
+                    "Failed to rewrite Raft log"
+                );
+            }
+
+            if (written == 0) {
+
+                closeAndRemove();
+
+                throw std::runtime_error(
+                    "Raft log rewrite made no progress"
+                );
+            }
+
+            total_written +=
+                static_cast<std::size_t>(
+                    written
+                );
+        }
+    }
+
+    while (
+        fsync(fd) < 0
+    ) {
+        if (errno == EINTR) {
+            continue;
+        }
+
+        closeAndRemove();
+
+        throw std::runtime_error(
+            "Failed to sync rewritten Raft log"
+        );
+    }
+
+    if (
+        close(fd) < 0
+    ) {
+        unlink(
+            temp_filename.c_str()
+        );
+
+        throw std::runtime_error(
+            "Failed to close rewritten Raft log"
+        );
+    }
+
+    if (
+        rename(
+            temp_filename.c_str(),
+            filename.c_str()
+        ) < 0
+    ) {
+        unlink(
+            temp_filename.c_str()
+        );
+
+        throw std::runtime_error(
+            "Failed to publish rewritten Raft log"
+        );
+    }
+
+    /*
+     * Make the rename durable.
+     */
+    syncDirectory(
+        filename
+    );
+}
 
 uint64_t parseNumber(std::string_view token)
 {
@@ -210,49 +387,6 @@ ParsedLog readLogFile(
     }
 
     return result;
-}
-
-void syncDirectory(
-    const std::string& filename
-)
-{
-    auto directory =
-        std::filesystem::path(filename)
-            .parent_path();
-
-    if (directory.empty()) {
-        directory = ".";
-    }
-
-    int fd = open(
-        directory.c_str(),
-        O_RDONLY | O_DIRECTORY
-    );
-
-    if (fd < 0) {
-        throw std::runtime_error(
-            "Failed to open Raft log directory"
-        );
-    }
-
-    while (fsync(fd) < 0) {
-
-        if (errno == EINTR) {
-            continue;
-        }
-
-        close(fd);
-
-        throw std::runtime_error(
-            "Failed to sync Raft log directory"
-        );
-    }
-
-    if (close(fd) < 0) {
-        throw std::runtime_error(
-            "Failed to close Raft log directory"
-        );
-    }
 }
 
 void repairIncompleteTail(
@@ -552,5 +686,427 @@ RaftLog::termAt(
         )
     ].term;
 }
+std::optional<RaftLogEntry>
+RaftLog::entryAt(
+    uint64_t index
+)
+{
+    /*
+     * Index zero is Raft's imaginary
+     * entry before the real log.
+     */
+    if (index == 0) {
+        return std::nullopt;
+    }
 
+    auto entries =
+        load();
+
+    for (
+        const auto& entry :
+        entries
+    ) {
+        if (
+            entry.index == index
+        ) {
+            return entry;
+        }
+    }
+
+    return std::nullopt;
+}
+std::vector<RaftLogEntry>
+RaftLog::entriesFrom(
+    uint64_t start_index
+)
+{
+    std::vector<RaftLogEntry> result;
+
+    auto entries =
+        load();
+
+    for (
+        const auto& entry :
+        entries
+    ) {
+        if (
+            entry.index >=
+            start_index
+        ) {
+            result.push_back(
+                entry
+            );
+        }
+    }
+
+    return result;
+}
+void RaftLog::appendFromLeader(
+    const std::vector<RaftLogEntry>& incoming_entries
+)
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    if (append_failed_) {
+        throw std::runtime_error(
+            "Raft log requires recovery"
+        );
+    }
+
+    if (
+        incoming_entries.empty()
+    ) {
+        return;
+    }
+
+    /*
+     * Validate the incoming batch first.
+     *
+     * AppendEntries must contain a
+     * contiguous sequence of log entries.
+     */
+    for (
+        std::size_t i = 0;
+        i < incoming_entries.size();
+        ++i
+    ) {
+        const auto& entry =
+            incoming_entries[i];
+
+        if (
+            entry.index == 0 ||
+            entry.term == 0 ||
+            entry.command.empty() ||
+            entry.command.find_first_of(
+                "\n\r\t"
+            ) != std::string::npos
+        ) {
+            throw std::runtime_error(
+                "Invalid leader Raft log entry"
+            );
+        }
+
+        if (
+            i > 0
+        ) {
+            const auto& previous =
+                incoming_entries[i - 1];
+
+            if (
+                entry.index !=
+                previous.index + 1
+            ) {
+                throw std::runtime_error(
+                    "Leader Raft entries are not contiguous"
+                );
+            }
+
+            if (
+                entry.term <
+                previous.term
+            ) {
+                throw std::runtime_error(
+                    "Leader Raft terms cannot decrease"
+                );
+            }
+        }
+    }
+
+    const uint64_t first_index =
+        incoming_entries.front().index;
+
+    /*
+     * We cannot accept an entry after a
+     * missing gap.
+     *
+     * Example:
+     *
+     * follower ends at 3
+     * leader tries to send entry 7
+     *
+     * Entries 4-6 are missing.
+     */
+    if (
+        first_index >
+        next_index_
+    ) {
+        throw std::runtime_error(
+            "Leader Raft entries contain a gap"
+        );
+    }
+
+    /*
+     * Find the first incoming entry that
+     * is either:
+     *
+     * 1. missing locally, or
+     * 2. conflicts with our local entry.
+     */
+    std::size_t incoming_position = 0;
+
+    while (
+        incoming_position <
+        incoming_entries.size()
+    ) {
+        const auto& incoming =
+            incoming_entries[
+                incoming_position
+            ];
+
+        if (
+            incoming.index >=
+            next_index_
+        ) {
+            /*
+             * Follower is shorter.
+             * Everything from here onward
+             * must be appended.
+             */
+            break;
+        }
+
+        const auto& local =
+            entries_[
+                static_cast<std::size_t>(
+                    incoming.index - 1
+                )
+            ];
+
+        /*
+         * Same index and term means these
+         * should represent the same Raft
+         * log entry.
+         */
+        if (
+            local.term ==
+            incoming.term
+        ) {
+            /*
+             * Same index + same term but
+             * different command would violate
+             * Raft's log matching guarantee.
+             */
+            if (
+                local.command !=
+                incoming.command
+            ) {
+                throw std::runtime_error(
+                    "Raft log contains same-term command conflict"
+                );
+            }
+
+            ++incoming_position;
+
+            continue;
+        }
+
+        /*
+         * Same index but different term:
+         * this is the first conflicting
+         * entry.
+         */
+        break;
+    }
+
+    /*
+     * Every incoming entry already exists
+     * identically. This is a retry /
+     * duplicate AppendEntries request.
+     */
+    if (
+        incoming_position ==
+        incoming_entries.size()
+    ) {
+        return;
+    }
+
+    const uint64_t replacement_index =
+        incoming_entries[
+            incoming_position
+        ].index;
+
+    std::vector<RaftLogEntry>
+        new_entries;
+
+    /*
+     * Preserve everything before the
+     * first missing/conflicting index.
+     */
+    for (
+        const auto& local :
+        entries_
+    ) {
+        if (
+            local.index >=
+            replacement_index
+        ) {
+            break;
+        }
+
+        new_entries.push_back(
+            local
+        );
+    }
+
+    /*
+     * The first new entry's term cannot
+     * go backwards relative to the
+     * retained prefix.
+     */
+    if (
+        !new_entries.empty() &&
+        incoming_entries[
+            incoming_position
+        ].term <
+        new_entries.back().term
+    ) {
+        throw std::runtime_error(
+            "Leader Raft term precedes retained log term"
+        );
+    }
+
+    /*
+     * Add the leader's authoritative
+     * suffix.
+     */
+    for (
+        std::size_t i =
+            incoming_position;
+        i < incoming_entries.size();
+        ++i
+    ) {
+        new_entries.push_back(
+            incoming_entries[i]
+        );
+    }
+
+    /*
+     * Once durable rewriting begins,
+     * any failure requires restart /
+     * recovery before another mutation.
+     */
+    append_failed_ = true;
+
+    rewriteLogFile(
+        filename_,
+        new_entries
+    );
+
+    /*
+     * Publish only after the rewritten
+     * log is durable.
+     */
+    entries_ =
+        std::move(
+            new_entries
+        );
+
+    if (
+        entries_.empty()
+    ) {
+        next_index_ = 1;
+    }
+    else {
+        next_index_ =
+            entries_.back().index + 1;
+    }
+
+    append_failed_ = false;
+}
+void RaftLog::truncateSuffix(
+    uint64_t from_index
+)
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    if (append_failed_) {
+        throw std::runtime_error(
+            "Raft log requires recovery"
+        );
+    }
+
+    /*
+     * Index zero is only the Raft
+     * sentinel and cannot be truncated.
+     */
+    if (from_index == 0) {
+        throw std::runtime_error(
+            "Invalid Raft log truncation index"
+        );
+    }
+
+    /*
+     * No entries exist at or beyond
+     * this index.
+     */
+    if (
+        from_index >=
+        next_index_
+    ) {
+        return;
+    }
+
+    std::vector<RaftLogEntry>
+        retained_entries;
+
+    retained_entries.reserve(
+        static_cast<std::size_t>(
+            from_index - 1
+        )
+    );
+
+    for (
+        const auto& entry :
+        entries_
+    ) {
+        if (
+            entry.index >=
+            from_index
+        ) {
+            break;
+        }
+
+        retained_entries.push_back(
+            entry
+        );
+    }
+
+    /*
+     * Once rewriting begins, any failure
+     * requires recovery before another
+     * mutation is attempted.
+     */
+    append_failed_ = true;
+
+    rewriteLogFile(
+        filename_,
+        retained_entries
+    );
+
+    /*
+     * Only publish the new state in
+     * memory after the durable rewrite
+     * succeeds.
+     */
+    entries_ =
+        std::move(
+            retained_entries
+        );
+
+    if (
+        entries_.empty()
+    ) {
+        next_index_ = 1;
+    }
+    else {
+        next_index_ =
+            entries_.back().index + 1;
+    }
+
+    append_failed_ = false;
+}
 }

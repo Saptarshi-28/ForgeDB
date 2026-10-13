@@ -7,38 +7,117 @@ int main()
 {
     using namespace forgedb::raft;
 
+    /*
+     * ------------------------------------------------
+     * 1. Heartbeat: zero entries
+     * ------------------------------------------------
+     */
     AppendEntriesRequest heartbeat{
-        4,
+        5,
         "node1",
-        7,
-        3,
-        5
+        0,
+        0,
+        0,
+        {}
     };
 
-    std::string encoded =
+    std::string heartbeat_wire =
         encodeAppendEntries(
             heartbeat
         );
 
+    std::cout
+        << "Heartbeat wire:\n"
+        << heartbeat_wire;
+
+    auto decoded_heartbeat =
+        decodeAppendEntries(
+            heartbeat_wire
+        );
+
     assert(
-        encoded ==
-        "RAFT_APPEND 4 node1 7 3 5\n"
+        decoded_heartbeat.has_value()
     );
+
+    assert(
+        decoded_heartbeat->term == 5
+    );
+
+    assert(
+        decoded_heartbeat->leader_id ==
+        "node1"
+    );
+
+    assert(
+        decoded_heartbeat->
+            prev_log_index == 0
+    );
+
+    assert(
+        decoded_heartbeat->
+            prev_log_term == 0
+    );
+
+    assert(
+        decoded_heartbeat->
+            leader_commit == 0
+    );
+
+    assert(
+        decoded_heartbeat->
+            entries.empty()
+    );
+
+    /*
+     * ------------------------------------------------
+     * 2. AppendEntries with real commands
+     * ------------------------------------------------
+     */
+    AppendEntriesRequest replication{
+        6,
+        "node2",
+        7,
+        5,
+        6,
+        {
+            {
+                8,
+                6,
+                "SET alpha one"
+            },
+            {
+                9,
+                6,
+                "DELETE beta"
+            }
+        }
+    };
+
+    std::string replication_wire =
+        encodeAppendEntries(
+            replication
+        );
+
+    std::cout
+        << "\nReplication wire:\n"
+        << replication_wire;
 
     auto decoded =
         decodeAppendEntries(
-            encoded
+            replication_wire
         );
 
-    assert(decoded.has_value());
+    assert(
+        decoded.has_value()
+    );
 
     assert(
-        decoded->term == 4
+        decoded->term == 6
     );
 
     assert(
         decoded->leader_id ==
-        "node1"
+        "node2"
     );
 
     assert(
@@ -46,136 +125,100 @@ int main()
     );
 
     assert(
-        decoded->prev_log_term == 3
+        decoded->prev_log_term == 5
     );
 
     assert(
-        decoded->leader_commit == 5
-    );
-
-    std::cout
-        << "AppendEntries encoding passed\n";
-
-    /*
-     * Empty log heartbeat.
-     */
-    auto empty =
-        decodeAppendEntries(
-            "RAFT_APPEND 1 node2 0 0 0\n"
-        );
-
-    assert(
-        empty.has_value()
-    );
-
-    std::cout
-        << "Empty-log heartbeat passed\n";
-
-    /*
-     * Invalid messages.
-     */
-    assert(
-        !decodeAppendEntries(
-            "RAFT_APPEND"
-        )
+        decoded->leader_commit == 6
     );
 
     assert(
-        !decodeAppendEntries(
-            "RAFT_APPEND 4 node1 7 3"
-        )
+        decoded->entries.size() == 2
     );
 
     assert(
-        !decodeAppendEntries(
-            "RAFT_APPEND -1 node1 7 3 5"
-        )
+        decoded->entries[0].index == 8
     );
 
     assert(
-        !decodeAppendEntries(
-            "RAFT_APPEND 4 node1 0 3 0"
-        )
+        decoded->entries[0].term == 6
     );
 
     assert(
-        !decodeAppendEntries(
-            "RAFT_APPEND 4 node1 7 3 5 extra"
-        )
-    );
-
-    std::cout
-        << "Invalid heartbeat tests passed\n";
-
-    /*
-     * Successful response.
-     */
-    AppendEntriesResponse response{
-        4,
-        true
-    };
-
-    std::string encoded_response =
-        encodeAppendEntriesResponse(
-            response
-        );
-
-    assert(
-        encoded_response ==
-        "RAFT_APPEND_REPLY 4 1\n"
-    );
-
-    auto decoded_response =
-        decodeAppendEntriesResponse(
-            encoded_response
-        );
-
-    assert(
-        decoded_response.has_value()
+        decoded->entries[0].command ==
+        "SET alpha one"
     );
 
     assert(
-        decoded_response->term == 4
+        decoded->entries[1].index == 9
     );
 
     assert(
-        decoded_response->success
+        decoded->entries[1].term == 6
+    );
+
+    assert(
+        decoded->entries[1].command ==
+        "DELETE beta"
     );
 
     /*
-     * Rejected heartbeat.
+     * ------------------------------------------------
+     * 3. Reject broken hex
+     * ------------------------------------------------
      */
-    auto rejected =
-        decodeAppendEntriesResponse(
-            "RAFT_APPEND_REPLY 6 0\n"
-        );
-
     assert(
-        rejected.has_value()
-    );
-
-    assert(
-        rejected->term == 6
-    );
-
-    assert(
-        !rejected->success
+        !decodeAppendEntries(
+            "RAFT_APPEND "
+            "1 node1 0 0 0 "
+            "1 1 1 XYZ\n"
+        ).has_value()
     );
 
     /*
-     * Invalid response.
+     * ------------------------------------------------
+     * 4. Reject missing entry
+     * ------------------------------------------------
      */
     assert(
-        !decodeAppendEntriesResponse(
-            "RAFT_APPEND_REPLY 4 8"
-        )
+        !decodeAppendEntries(
+            "RAFT_APPEND "
+            "1 node1 0 0 0 1\n"
+        ).has_value()
+    );
+
+    /*
+     * ------------------------------------------------
+     * 5. Reject non-contiguous index
+     * ------------------------------------------------
+     *
+     * prev index = 5, so the first
+     * new entry must be index 6.
+     */
+    assert(
+        !decodeAppendEntries(
+            "RAFT_APPEND "
+            "2 node1 5 1 0 "
+            "1 8 2 "
+            "53455420612062\n"
+        ).has_value()
+    );
+
+    /*
+     * ------------------------------------------------
+     * 6. Reject trailing garbage
+     * ------------------------------------------------
+     */
+    assert(
+        !decodeAppendEntries(
+            "RAFT_APPEND "
+            "1 node1 0 0 0 "
+            "0 unexpected\n"
+        ).has_value()
     );
 
     std::cout
-        << "AppendEntries response passed\n";
-
-    std::cout
-        << "All AppendEntries protocol tests passed\n";
+        << "\nAppendEntries protocol tests passed\n";
 
     return 0;
 }

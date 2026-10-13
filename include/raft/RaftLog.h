@@ -13,14 +13,10 @@ namespace forgedb::raft {
 class RaftLog {
 public:
 
-    explicit RaftLog(
-        const std::string& filename
-    );
+    explicit RaftLog(const std::string& filename);
 
-    RaftLogEntry append(
-        uint64_t term,
-        const std::string& command
-    );
+    RaftLogEntry append(uint64_t term,const std::string& command);
+    void appendFromLeader(const std::vector<RaftLogEntry>& entries);
 
     std::optional<uint64_t>
     termAt(
@@ -31,6 +27,10 @@ public:
 
     std::pair<uint64_t, uint64_t>
     lastLogInfo() const;
+
+    void truncateSuffix(uint64_t from_index);
+    std::optional<RaftLogEntry> entryAt(uint64_t index);
+    std::vector<RaftLogEntry> entriesFrom(uint64_t start_index);
 
 private:
 

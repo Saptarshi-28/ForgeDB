@@ -1,6 +1,6 @@
 #include "raft/RaftHeartbeatLoop.h"
 #include "raft/RaftHeartbeat.h"
-
+#include <iostream>
 #include <stdexcept>
 #include <thread>
 
@@ -11,12 +11,14 @@ RaftHeartbeatLoop::RaftHeartbeatLoop(
     RaftState& state,
     RaftLog& log,
     const std::vector<RaftPeer>& peers,
+    RaftLeaderProgress& progress,
     std::chrono::milliseconds interval
 )
     : node_id_(node_id),
       state_(state),
       log_(log),
       peers_(peers),
+      progress_(progress),
       interval_(interval)
 {
     if (node_id_.empty()) {
@@ -81,9 +83,10 @@ void RaftHeartbeatLoop::run()
         node_id_,
         state_,
         log_,
-        peers_
+        peers_,
+        progress_
     );
-
+    uint64_t initialized_leader_term = 0;
     while (
         running_.load()
     ) {
@@ -95,9 +98,33 @@ void RaftHeartbeatLoop::run()
             state_.role() ==
             RaftRole::LEADER
         ) {
+            const uint64_t current_term = state_.currentTerm();
+
+            if (
+                initialized_leader_term !=
+                current_term
+            ) {
+                const auto last_log =
+                    log_.lastLogInfo();
+
+                progress_.reset(
+                    last_log.first
+                );
+
+                initialized_leader_term =
+                    current_term;
+
+                std::cout
+                    << node_id_
+                    << " initialized follower progress "
+                    << "for leader term "
+                    << current_term
+                    << " at nextIndex "
+                    << last_log.first + 1
+                    << "\n";
+            }
             auto result =
                 heartbeat.sendHeartbeats();
-
             /*
              * sendHeartbeats() already
              * updates RaftState when a

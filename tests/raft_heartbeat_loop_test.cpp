@@ -1,5 +1,5 @@
 #include "raft/RaftHeartbeatLoop.h"
-
+#include "raft/RaftLeaderProgress.h"
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -63,6 +63,9 @@ int main()
             6381
         }
     };
+    RaftLeaderProgress progress(
+        peers
+    );
 
     /*
      * Use 200 ms here to make the
@@ -73,6 +76,7 @@ int main()
         state,
         log,
         peers,
+        progress,
         200ms
     );
 

@@ -22,6 +22,7 @@
 #include "raft/RaftElectionLoop.h"
 #include "raft/RaftHeartbeatLoop.h"
 #include <vector>
+#include "raft/RaftLeaderProgress.h"
 
 namespace forgedb::network {
 
@@ -94,14 +95,11 @@ namespace forgedb::network {
 			uint64_t next_replication_to_send_ = 1;
 
 			std::string node_id_;
-
 			forgedb::raft::RaftState raft_state_;
-
 			forgedb::raft::RaftLog raft_log_;
 
-			std::vector<
-			    forgedb::raft::RaftPeer
-			> raft_peers_;
+			std::vector<forgedb::raft::RaftPeer> raft_peers_;
+			forgedb::raft::RaftLeaderProgress raft_leader_progress_;
 
 			forgedb::raft::ElectionTimer election_timer_{
 			    std::chrono::milliseconds{1200},

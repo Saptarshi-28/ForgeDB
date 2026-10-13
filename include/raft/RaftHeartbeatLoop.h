@@ -3,7 +3,7 @@
 #include "raft/RaftLog.h"
 #include "raft/RaftPeer.h"
 #include "raft/RaftState.h"
-
+#include "raft/RaftLeaderProgress.h"
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -19,8 +19,8 @@ public:
         RaftState& state,
         RaftLog& log,
         const std::vector<RaftPeer>& peers,
-        std::chrono::milliseconds interval =
-            std::chrono::milliseconds{250}
+        RaftLeaderProgress& progress,
+        std::chrono::milliseconds interval
     );
 
     ~RaftHeartbeatLoop();
@@ -42,11 +42,10 @@ private:
 
     std::vector<RaftPeer> peers_;
 
+    RaftLeaderProgress& progress_;
     std::chrono::milliseconds interval_;
 
-    std::atomic<bool> running_{
-        false
-    };
+    std::atomic<bool> running_{false};
 
     std::thread worker_;
 };

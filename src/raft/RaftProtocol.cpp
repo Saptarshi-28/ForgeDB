@@ -1,14 +1,138 @@
 #include "raft/RaftProtocol.h"
-
+#include <optional>
 #include <charconv>
 #include <cstdint>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace forgedb::raft {
 
 namespace {
+
+char hexDigit(
+    unsigned int value
+)
+{
+    if (value < 10) {
+        return static_cast<char>(
+            '0' + value
+        );
+    }
+
+    return static_cast<char>(
+        'A' + (value - 10)
+    );
+}
+
+std::string encodeHex(
+    const std::string& input
+)
+{
+    std::string output;
+
+    output.reserve(
+        input.size() * 2
+    );
+
+    for (
+        unsigned char character :
+        input
+    ) {
+        output.push_back(
+            hexDigit(
+                character >> 4
+            )
+        );
+
+        output.push_back(
+            hexDigit(
+                character & 0x0F
+            )
+        );
+    }
+
+    return output;
+}
+
+int hexValue(
+    char character
+)
+{
+    if (
+        character >= '0' &&
+        character <= '9'
+    ) {
+        return character - '0';
+    }
+
+    if (
+        character >= 'A' &&
+        character <= 'F'
+    ) {
+        return character - 'A' + 10;
+    }
+
+    if (
+        character >= 'a' &&
+        character <= 'f'
+    ) {
+        return character - 'a' + 10;
+    }
+
+    return -1;
+}
+
+std::optional<std::string> decodeHex(
+    const std::string& input
+)
+{
+    if (
+        input.empty() ||
+        input.size() % 2 != 0
+    ) {
+        return std::nullopt;
+    }
+
+    std::string output;
+
+    output.reserve(
+        input.size() / 2
+    );
+
+    for (
+        std::size_t i = 0;
+        i < input.size();
+        i += 2
+    ) {
+        int high =
+            hexValue(
+                input[i]
+            );
+
+        int low =
+            hexValue(
+                input[i + 1]
+            );
+
+        if (
+            high < 0 ||
+            low < 0
+        ) {
+            return std::nullopt;
+        }
+
+        output.push_back(
+            static_cast<char>(
+                (high << 4) |
+                low
+            )
+        );
+    }
+
+    return output;
+}
 
 bool parseUnsigned(
     const std::string& token,
@@ -168,24 +292,40 @@ std::string encodeAppendEntries(
     const AppendEntriesRequest& request
 )
 {
-    return
-        "RAFT_APPEND " +
-        std::to_string(request.term) +
-        " " +
-        request.leader_id +
-        " " +
-        std::to_string(
-            request.prev_log_index
-        ) +
-        " " +
-        std::to_string(
-            request.prev_log_term
-        ) +
-        " " +
-        std::to_string(
-            request.leader_commit
-        ) +
-        "\n";
+    std::ostringstream stream;
+
+    stream
+        << "RAFT_APPEND "
+        << request.term
+        << " "
+        << request.leader_id
+        << " "
+        << request.prev_log_index
+        << " "
+        << request.prev_log_term
+        << " "
+        << request.leader_commit
+        << " "
+        << request.entries.size();
+
+    for (
+        const auto& entry :
+        request.entries
+    ) {
+        stream
+            << " "
+            << entry.index
+            << " "
+            << entry.term
+            << " "
+            << encodeHex(
+                entry.command
+            );
+    }
+
+    stream << "\n";
+
+    return stream.str();
 }
 
 std::optional<AppendEntriesRequest>
@@ -198,88 +338,112 @@ decodeAppendEntries(
     );
 
     std::string marker;
-    std::string term_token;
-    std::string leader_id;
-    std::string index_token;
-    std::string log_term_token;
-    std::string commit_token;
-    std::string extra;
 
-    if (!(
-        stream >>
-        marker >>
-        term_token >>
-        leader_id >>
-        index_token >>
-        log_term_token >>
-        commit_token
-    )) {
-        return std::nullopt;
-    }
+    AppendEntriesRequest request{};
+
+    std::size_t entry_count = 0;
 
     if (
-        marker != "RAFT_APPEND" ||
-        stream >> extra
-    ) {
-        return std::nullopt;
-    }
-
-    uint64_t term = 0;
-    uint64_t previous_index = 0;
-    uint64_t previous_term = 0;
-    uint64_t leader_commit = 0;
-
-    if (
-        !parseUnsigned(
-            term_token,
-            term
-        ) ||
-        !parseUnsigned(
-            index_token,
-            previous_index
-        ) ||
-        !parseUnsigned(
-            log_term_token,
-            previous_term
-        ) ||
-        !parseUnsigned(
-            commit_token,
-            leader_commit
-        )
+        !(stream >> marker) ||
+        marker != "RAFT_APPEND"
     ) {
         return std::nullopt;
     }
 
     if (
-        term == 0 ||
-        leader_id.empty()
+        !(stream >> request.term) ||
+        !(stream >> request.leader_id) ||
+        !(stream >> request.prev_log_index) ||
+        !(stream >> request.prev_log_term) ||
+        !(stream >> request.leader_commit) ||
+        !(stream >> entry_count)
     ) {
         return std::nullopt;
     }
 
     /*
-     * The empty-log sentinel is:
+     * Index zero represents the
+     * imaginary entry before the log.
      *
-     * prev_log_index = 0
-     * prev_log_term  = 0
-     *
-     * index zero with a non-zero term
-     * makes no sense.
+     * It therefore must have term zero.
      */
     if (
-        previous_index == 0 &&
-        previous_term != 0
+        request.prev_log_index == 0 &&
+        request.prev_log_term != 0
     ) {
         return std::nullopt;
     }
 
-    return AppendEntriesRequest{
-        term,
-        leader_id,
-        previous_index,
-        previous_term,
-        leader_commit
-    };
+    request.entries.reserve(
+        entry_count
+    );
+
+    uint64_t expected_index =
+        request.prev_log_index + 1;
+
+    for (
+        std::size_t i = 0;
+        i < entry_count;
+        ++i
+    ) {
+        RaftLogEntry entry{};
+
+        std::string encoded_command;
+
+        if (
+            !(stream >> entry.index) ||
+            !(stream >> entry.term) ||
+            !(stream >> encoded_command)
+        ) {
+            return std::nullopt;
+        }
+
+        auto decoded =
+            decodeHex(
+                encoded_command
+            );
+
+        if (
+            !decoded.has_value()
+        ) {
+            return std::nullopt;
+        }
+
+        entry.command =
+            std::move(
+                *decoded
+            );
+
+        /*
+         * Entries inside one AppendEntries
+         * RPC must be contiguous.
+         */
+        if (
+            entry.index !=
+            expected_index
+        ) {
+            return std::nullopt;
+        }
+
+        request.entries.push_back(
+            std::move(entry)
+        );
+
+        ++expected_index;
+    }
+
+    /*
+     * Reject unexpected extra fields.
+     */
+    std::string extra;
+
+    if (
+        stream >> extra
+    ) {
+        return std::nullopt;
+    }
+
+    return request;
 }
 
 std::string encodeAppendEntriesResponse(
