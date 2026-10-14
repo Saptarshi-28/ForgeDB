@@ -34,6 +34,7 @@ add_executable(forgedb
         src/raft/RaftHeartbeatLoop.cpp
         src/raft/RaftHeartbeat.cpp
         src/raft/RaftLeaderProgress.cpp
+        src/raft/RaftCommitState.cpp
 )
 
 add_executable(forge_benchmark

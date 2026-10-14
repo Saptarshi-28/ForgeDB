@@ -47,6 +47,8 @@ public:
         const std::string& peer_id
     );
 
+    std::vector<uint64_t> followerMatchIndexes() const;
+
 private:
 
     PeerProgress&

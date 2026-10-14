@@ -32,6 +32,9 @@ public:
     std::optional<RaftLogEntry> entryAt(uint64_t index);
     std::vector<RaftLogEntry> entriesFrom(uint64_t start_index);
 
+    void protectCommittedThrough(uint64_t index);
+    uint64_t protectedIndex() const;
+
 private:
 
     std::string filename_;
@@ -42,6 +45,7 @@ private:
     bool append_failed_ = false;
 
     std::vector<RaftLogEntry> entries_;
+    uint64_t protected_index_ = 0;
 };
 
 }

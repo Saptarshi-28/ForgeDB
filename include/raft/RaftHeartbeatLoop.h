@@ -1,9 +1,9 @@
 #pragma once
-
 #include "raft/RaftLog.h"
 #include "raft/RaftPeer.h"
 #include "raft/RaftState.h"
 #include "raft/RaftLeaderProgress.h"
+#include "raft/RaftCommitState.h"
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -20,6 +20,7 @@ public:
         RaftLog& log,
         const std::vector<RaftPeer>& peers,
         RaftLeaderProgress& progress,
+        RaftCommitState& commit_state,
         std::chrono::milliseconds interval
     );
 
@@ -43,6 +44,8 @@ private:
     std::vector<RaftPeer> peers_;
 
     RaftLeaderProgress& progress_;
+    RaftCommitState& commit_state_;
+
     std::chrono::milliseconds interval_;
 
     std::atomic<bool> running_{false};

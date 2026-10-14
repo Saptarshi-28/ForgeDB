@@ -12,6 +12,7 @@ RaftHeartbeatLoop::RaftHeartbeatLoop(
     RaftLog& log,
     const std::vector<RaftPeer>& peers,
     RaftLeaderProgress& progress,
+    RaftCommitState& commit_state,
     std::chrono::milliseconds interval
 )
     : node_id_(node_id),
@@ -19,6 +20,7 @@ RaftHeartbeatLoop::RaftHeartbeatLoop(
       log_(log),
       peers_(peers),
       progress_(progress),
+      commit_state_(commit_state),
       interval_(interval)
 {
     if (node_id_.empty()) {
@@ -123,23 +125,69 @@ void RaftHeartbeatLoop::run()
                     << last_log.first + 1
                     << "\n";
             }
-            auto result =
-                heartbeat.sendHeartbeats();
             /*
-             * sendHeartbeats() already
-             * updates RaftState when a
-             * peer reports a newer term.
+             * Read the current committed index.
+             *
+             * This will be included in every
+             * AppendEntries RPC during this round.
+             */
+            const uint64_t leader_commit =
+                commit_state_.commitIndex();
+
+            auto result =
+                heartbeat.sendHeartbeats(
+                    leader_commit
+                );
+
+            /*
+             * Do not calculate leader commit
+             * if this node stepped down while
+             * communicating with followers.
              */
             if (
-                result.stepped_down
+                result.stepped_down ||
+                state_.role() != RaftRole::LEADER ||
+                state_.currentTerm() != current_term
             ) {
-                /*
-                 * Nothing else to do.
-                 *
-                 * Next iterations will
-                 * see FOLLOWER and stop
-                 * sending heartbeats.
-                 */
+                continue;
+            }
+
+            /*
+             * Take a thread-safe snapshot
+             * of follower matchIndex values.
+             */
+            auto follower_indexes =
+                progress_.followerMatchIndexes();
+
+            const uint64_t old_commit =
+                commit_state_.commitIndex();
+
+            /*
+             * Calculate the highest index
+             * replicated on a majority.
+             *
+             * Only current-term entries may
+             * directly advance commitIndex.
+             */
+            const uint64_t new_commit =
+                commit_state_.advanceLeaderCommit(
+                    current_term,
+                    follower_indexes,
+                    log_
+                );
+
+            if (
+                new_commit > old_commit
+            ) {
+                std::cout
+                    << node_id_
+                    << " advanced commitIndex "
+                    << old_commit
+                    << " -> "
+                    << new_commit
+                    << " in term "
+                    << current_term
+                    << "\n";
             }
         }
 

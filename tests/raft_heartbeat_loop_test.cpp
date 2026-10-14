@@ -6,6 +6,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include "raft/RaftCommitState.h"
 
 int main()
 {
@@ -66,7 +67,9 @@ int main()
     RaftLeaderProgress progress(
         peers
     );
-
+    RaftCommitState commit(
+    RaftCommitState::VolatileForTests{}
+);
     /*
      * Use 200 ms here to make the
      * test visibly quick.
@@ -77,7 +80,17 @@ int main()
         log,
         peers,
         progress,
+        commit,
         200ms
+    );
+    auto entry =
+        log.append(
+            1,
+            "SET noquorum value"
+        );
+
+    assert(
+        entry.index == 1
     );
 
     loop.start();
@@ -95,6 +108,25 @@ int main()
     );
 
     loop.stop();
+
+    assert(
+        commit.commitIndex() == 0
+    );
+
+    assert(
+        progress.matchIndex(
+            "node2"
+        ) == 0
+    );
+
+    assert(
+        progress.matchIndex(
+            "node3"
+        ) == 0
+    );
+
+    std::cout
+        << "No-quorum commit correctly blocked\n";
 
     assert(
         !loop.running()

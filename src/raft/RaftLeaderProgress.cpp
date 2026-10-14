@@ -116,6 +116,31 @@ PeerProgress RaftLeaderProgress::progress(
         );
 }
 
+std::vector<uint64_t>
+RaftLeaderProgress::followerMatchIndexes() const
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    std::vector<uint64_t> indexes;
+
+    indexes.reserve(
+        progress_.size()
+    );
+
+    for (
+        const auto& [peer_id, state] :
+        progress_
+    ) {
+        indexes.push_back(
+            state.match_index
+        );
+    }
+
+    return indexes;
+}
+
 void RaftLeaderProgress::recordSuccess(
     const std::string& peer_id,
     uint64_t replicated_through

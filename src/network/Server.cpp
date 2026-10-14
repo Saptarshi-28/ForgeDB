@@ -19,6 +19,8 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -72,10 +74,9 @@ namespace forgedb::network {
               "raft.log"
           ),
           raft_peers_(raft_peers),
+          raft_leader_progress_(raft_peers_),
+          raft_commit_state_(raft_log_),
 
-          raft_leader_progress_(
-              raft_peers_
-          ),
           raft_election_loop_(
               node_id_,
               raft_state_,
@@ -90,6 +91,7 @@ namespace forgedb::network {
               raft_log_,
               raft_peers_,
               raft_leader_progress_,
+              raft_commit_state_,
               std::chrono::milliseconds{250}
           )
     {
@@ -1434,7 +1436,9 @@ namespace forgedb::network {
                 "ERR invalid Raft AppendEntries request\n"
             };
         }
-
+        std::lock_guard<std::mutex> lock(
+            raft_append_mutex_
+        );
         try {
 
             /*
@@ -1509,6 +1513,69 @@ namespace forgedb::network {
                         })
                 };
             }
+            /*
+             * Incoming entries must immediately
+             * follow prevLogIndex.
+             */
+            if (
+                !request->entries.empty()
+            ) {
+                if (
+                    request->prev_log_index ==
+                    std::numeric_limits<uint64_t>::max() ||
+                    request->entries.front().index !=
+                        request->prev_log_index + 1
+                ) {
+                    return ClientResponse{
+                        client_fd,
+                        0,
+                        forgedb::raft::
+                            encodeAppendEntriesResponse({
+                                raft_state_.currentTerm(),
+                                false
+                            })
+                    };
+                }
+            }
+
+            /*
+             * An incoming conflicting entry must
+             * never overwrite a committed entry.
+             */
+            const uint64_t committed =
+                raft_commit_state_.commitIndex();
+
+            for (
+                const auto& incoming :
+                request->entries
+            ) {
+                if (
+                    incoming.index > committed
+                ) {
+                    break;
+                }
+
+                auto existing =
+                    raft_log_.entryAt(
+                        incoming.index
+                    );
+
+                if (
+                    !existing.has_value() ||
+                    existing->term != incoming.term ||
+                    existing->command != incoming.command
+                ) {
+                    return ClientResponse{
+                        client_fd,
+                        0,
+                        forgedb::raft::
+                            encodeAppendEntriesResponse({
+                                raft_state_.currentTerm(),
+                                false
+                            })
+                    };
+                }
+            }
 
             /*
              * The prefix matched.
@@ -1522,6 +1589,57 @@ namespace forgedb::network {
             raft_log_.appendFromLeader(
                 request->entries
             );
+            /*
+             * The last index verified by this
+             * successful AppendEntries request.
+             *
+             * If entries is empty, the matching
+             * prevLogIndex is the verified boundary.
+             */
+            uint64_t verified_index =
+                request->prev_log_index;
+
+            if (
+                !request->entries.empty()
+            ) {
+                verified_index =
+                    request->entries.back().index;
+            }
+
+            /*
+             * Never commit an unverified divergent
+             * suffix merely because it is present
+             * in the local log.
+             */
+            const uint64_t safe_leader_commit =
+                std::min(
+                    request->leader_commit,
+                    verified_index
+                );
+
+            const uint64_t local_last_index =
+                raft_log_.lastLogInfo().first;
+
+            const uint64_t old_commit =
+                raft_commit_state_.commitIndex();
+
+            const uint64_t new_commit =
+                raft_commit_state_.advanceFollowerCommit(
+                    safe_leader_commit,
+                    local_last_index
+                );
+
+            if (
+                new_commit > old_commit
+            ) {
+                std::cout
+                    << node_id_
+                    << " follower commitIndex advanced "
+                    << old_commit
+                    << " -> "
+                    << new_commit
+                    << "\n";
+            }
 
             if (
                 !request->entries.empty()

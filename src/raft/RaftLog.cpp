@@ -227,7 +227,144 @@ uint64_t parseNumber(std::string_view token)
 
     return value;
 }
+uint64_t readProtectedIndex(
+    const std::string& filename
+)
+{
+    std::ifstream file(
+        filename,
+        std::ios::binary
+    );
 
+    if (!file.is_open()) {
+        std::error_code error;
+
+        const bool exists =
+            std::filesystem::exists(
+                filename,
+                error
+            );
+
+        if (error || exists) {
+            throw std::runtime_error(
+                "Failed to open Raft commit marker"
+            );
+        }
+
+        return 0;
+    }
+
+    const std::string bytes{
+        std::istreambuf_iterator<char>(file),
+        std::istreambuf_iterator<char>()
+    };
+
+    if (
+        file.bad() ||
+        bytes.size() < 2 ||
+        bytes.back() != '\n' ||
+        bytes.find('\n') != bytes.size() - 1
+    ) {
+        throw std::runtime_error(
+            "Invalid Raft commit marker"
+        );
+    }
+
+    return parseNumber(
+        std::string_view(
+            bytes.data(),
+            bytes.size() - 1
+        )
+    );
+}
+
+void persistProtectedIndex(
+    const std::string& filename,
+    uint64_t index
+)
+{
+    const std::string temp =
+        filename + ".tmp";
+
+    const std::string bytes =
+        std::to_string(index) + "\n";
+
+    int fd = open(
+        temp.c_str(),
+        O_WRONLY | O_CREAT | O_TRUNC,
+        0644
+    );
+
+    if (fd < 0) {
+        throw std::runtime_error(
+            "Failed to open Raft commit marker temp file"
+        );
+    }
+
+    auto fail = [&](const char* message) {
+        close(fd);
+        unlink(temp.c_str());
+        throw std::runtime_error(message);
+    };
+
+    std::size_t written = 0;
+
+    while (written < bytes.size()) {
+        ssize_t count = write(
+            fd,
+            bytes.data() + written,
+            bytes.size() - written
+        );
+
+        if (count < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            fail("Failed to write Raft commit marker");
+        }
+
+        if (count == 0) {
+            fail(
+                "Raft commit marker write made no progress"
+            );
+        }
+
+        written +=
+            static_cast<std::size_t>(count);
+    }
+
+    while (fsync(fd) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+
+        fail("Failed to sync Raft commit marker");
+    }
+
+    if (close(fd) < 0) {
+        unlink(temp.c_str());
+
+        throw std::runtime_error(
+            "Failed to close Raft commit marker"
+        );
+    }
+
+    if (
+        rename(
+            temp.c_str(),
+            filename.c_str()
+        ) < 0
+    ) {
+        unlink(temp.c_str());
+
+        throw std::runtime_error(
+            "Failed to publish Raft commit marker"
+        );
+    }
+
+    syncDirectory(filename);
+}
 ParsedLog readLogFile(
     const std::string& filename
 )
@@ -472,13 +609,86 @@ RaftLog::RaftLog(
     entries_ =
         std::move(recovered.entries);
 
+    protected_index_ =
+        readProtectedIndex(
+            filename_ + ".commit"
+        );
+
+    if (
+        protected_index_ >
+        entries_.size()
+    ) {
+        throw std::runtime_error(
+            "Raft commit marker exceeds recovered log"
+        );
+    }
+
     if (!entries_.empty()) {
 
         next_index_ =
             entries_.back().index + 1;
     }
 }
+uint64_t RaftLog::protectedIndex() const
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
 
+    return protected_index_;
+}
+
+void RaftLog::protectCommittedThrough(
+    uint64_t index
+)
+{
+    std::lock_guard<std::mutex> lock(
+        mutex_
+    );
+
+    if (append_failed_) {
+        throw std::runtime_error(
+            "Raft log requires recovery"
+        );
+    }
+
+    /*
+     * Protected index never decreases.
+     */
+    if (index <= protected_index_) {
+        return;
+    }
+
+    /*
+     * Cannot protect an entry
+     * that doesn't exist locally.
+     */
+    if (index > entries_.size()) {
+        throw std::runtime_error(
+            "Cannot protect absent Raft log entries"
+        );
+    }
+
+    /*
+     * If the durable update fails,
+     * require recovery before another
+     * log mutation.
+     */
+    append_failed_ = true;
+
+    persistProtectedIndex(
+        filename_ + ".commit",
+        index
+    );
+
+    /*
+     * Publish in memory only after
+     * the marker is durable.
+     */
+    protected_index_ = index;
+
+    append_failed_ = false;
+}
 RaftLogEntry RaftLog::append(
     uint64_t term,
     const std::string& command
@@ -927,6 +1137,13 @@ void RaftLog::appendFromLeader(
             incoming_position
         ].index;
 
+    if (
+        replacement_index <= protected_index_
+    ) {
+        throw std::runtime_error(
+            "Cannot replace committed Raft entry"
+        );
+    }
     std::vector<RaftLogEntry>
         new_entries;
 
@@ -1036,6 +1253,14 @@ void RaftLog::truncateSuffix(
     if (from_index == 0) {
         throw std::runtime_error(
             "Invalid Raft log truncation index"
+        );
+    }
+
+    if (
+        from_index <= protected_index_
+    ) {
+        throw std::runtime_error(
+            "Cannot truncate committed Raft entry"
         );
     }
 

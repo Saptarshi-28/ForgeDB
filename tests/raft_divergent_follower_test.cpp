@@ -2,7 +2,7 @@
 #include "raft/RaftLeaderProgress.h"
 #include "raft/RaftLog.h"
 #include "raft/RaftState.h"
-
+#include "raft/RaftCommitState.h"
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -95,9 +95,10 @@ int main()
         }
     };
 
-    RaftLeaderProgress progress(
-        peers
-    );
+    RaftLeaderProgress progress(peers);
+    RaftCommitState commit(
+    RaftCommitState::VolatileForTests{}
+);
 
     RaftHeartbeatLoop loop(
         "node1",
@@ -105,6 +106,7 @@ int main()
         log,
         peers,
         progress,
+        commit,
         200ms
     );
 

@@ -50,7 +50,7 @@ RaftHeartbeat::RaftHeartbeat(
 }
 
 HeartbeatResult
-RaftHeartbeat::sendHeartbeats()
+RaftHeartbeat::sendHeartbeats(uint64_t leader_commit)
 {
     HeartbeatResult result{
         0,
@@ -123,7 +123,7 @@ RaftHeartbeat::sendHeartbeats()
             node_id_,
             prev_index,
             *prev_term,
-            0,
+            leader_commit,
             entries
         };
 

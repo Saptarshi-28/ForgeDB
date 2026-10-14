@@ -27,7 +27,9 @@ public:
         RaftLeaderProgress& progress
     );
 
-    HeartbeatResult sendHeartbeats();
+    HeartbeatResult sendHeartbeats(
+        uint64_t leader_commit = 0
+    );
 
 private:
     std::string node_id_;
