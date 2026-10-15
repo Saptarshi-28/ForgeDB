@@ -24,6 +24,8 @@
 #include <vector>
 #include "raft/RaftLeaderProgress.h"
 #include "raft/RaftCommitState.h"
+#include "raft/RaftApplyProgress.h"
+#include "raft/RaftCommittedApplier.h"
 
 namespace forgedb::network {
 
@@ -103,6 +105,9 @@ namespace forgedb::network {
 			forgedb::raft::RaftLeaderProgress raft_leader_progress_;
 			forgedb::raft::RaftCommitState raft_commit_state_;
 
+			forgedb::raft::RaftApplyProgress raft_apply_progress_;
+			forgedb::raft::RaftCommittedApplier raft_committed_applier_;
+
 			forgedb::raft::ElectionTimer election_timer_{
 			    std::chrono::milliseconds{1200},
 			    std::chrono::milliseconds{2000}
@@ -111,5 +116,6 @@ namespace forgedb::network {
 			forgedb::raft::RaftElectionLoop raft_election_loop_;
 			forgedb::raft::RaftHeartbeatLoop raft_heartbeat_loop_;
 			std::mutex raft_append_mutex_;
+			void applyCommittedOrTerminate();
 	};
 }

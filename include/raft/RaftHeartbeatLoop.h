@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <functional>
 
 namespace forgedb::raft {
 
@@ -21,7 +22,8 @@ public:
         const std::vector<RaftPeer>& peers,
         RaftLeaderProgress& progress,
         RaftCommitState& commit_state,
-        std::chrono::milliseconds interval
+        std::chrono::milliseconds interval,
+        std::function<void()> on_commit_advanced = {}
     );
 
     ~RaftHeartbeatLoop();
@@ -51,6 +53,7 @@ private:
     std::atomic<bool> running_{false};
 
     std::thread worker_;
+    std::function<void()> on_commit_advanced_;
 };
 
 }

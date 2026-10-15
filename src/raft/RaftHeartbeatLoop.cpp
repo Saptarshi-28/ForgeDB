@@ -3,6 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 namespace forgedb::raft {
 
@@ -13,7 +14,8 @@ RaftHeartbeatLoop::RaftHeartbeatLoop(
     const std::vector<RaftPeer>& peers,
     RaftLeaderProgress& progress,
     RaftCommitState& commit_state,
-    std::chrono::milliseconds interval
+    std::chrono::milliseconds interval,
+    std::function<void()> on_commit_advanced
 )
     : node_id_(node_id),
       state_(state),
@@ -21,7 +23,10 @@ RaftHeartbeatLoop::RaftHeartbeatLoop(
       peers_(peers),
       progress_(progress),
       commit_state_(commit_state),
-      interval_(interval)
+      interval_(interval),
+      on_commit_advanced_(
+          std::move(on_commit_advanced)
+      )
 {
     if (node_id_.empty()) {
         throw std::invalid_argument(
@@ -176,9 +181,7 @@ void RaftHeartbeatLoop::run()
                     log_
                 );
 
-            if (
-                new_commit > old_commit
-            ) {
+            if (new_commit > old_commit) {
                 std::cout
                     << node_id_
                     << " advanced commitIndex "
@@ -188,6 +191,16 @@ void RaftHeartbeatLoop::run()
                     << " in term "
                     << current_term
                     << "\n";
+
+                /*
+                 * RaftCommitState has already
+                 * persisted the committed prefix.
+                 *
+                 * Now apply the committed commands.
+                 */
+                if (on_commit_advanced_) {
+                    on_commit_advanced_();
+                }
             }
         }
 

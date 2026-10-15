@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <limits>
+#include <exception>
 
 namespace {
 
@@ -77,6 +78,18 @@ namespace forgedb::network {
           raft_leader_progress_(raft_peers_),
           raft_commit_state_(raft_log_),
 
+          raft_apply_progress_(
+              raft_log_,
+              "raft.applied"
+          ),
+
+          raft_committed_applier_(
+              raft_log_,
+              raft_commit_state_,
+              raft_apply_progress_,
+              store_
+          ),
+
           raft_election_loop_(
               node_id_,
               raft_state_,
@@ -92,7 +105,10 @@ namespace forgedb::network {
               raft_peers_,
               raft_leader_progress_,
               raft_commit_state_,
-              std::chrono::milliseconds{250}
+              std::chrono::milliseconds{250},
+              [this]() {
+                  applyCommittedOrTerminate();
+              }
           )
     {
         replication_enabled_ =
@@ -100,9 +116,53 @@ namespace forgedb::network {
             !replica_host_.empty() &&
             replica_port_ > 0;
     }
+    void Server::applyCommittedOrTerminate()
+    {
+        try {
+            raft_committed_applier_.applyCommitted();
+        }
+        catch (const std::exception& e) {
+            std::cerr
+                << "FATAL: Raft state-machine "
+                << "application failed on "
+                << node_id_
+                << ": "
+                << e.what()
+                << "\n";
 
+            /*
+             * Fail-stop: do not continue
+             * serving with an unhealthy
+             * replicated state machine.
+             */
+            std::terminate();
+        }
+    }
     void Server::start()
     {
+        if (role_ == NodeRole::RAFT) {
+
+            /*
+             * KeyValueStore has already recovered
+             * its own WAL during construction.
+             *
+             * Now replay any committed Raft entries
+             * not covered by lastApplied.
+             *
+             * No clients or Raft workers are
+             * running yet.
+             */
+            applyCommittedOrTerminate();
+
+            std::cout
+                << node_id_
+                << " recovered Raft state:"
+                << " commitIndex="
+                << raft_commit_state_.commitIndex()
+                << " lastApplied="
+                << raft_apply_progress_.lastApplied()
+                << "\n";
+        }
         if (!loadReplicationState()) {
 
             std::cerr
@@ -541,6 +601,25 @@ namespace forgedb::network {
         forgedb::commands::CommandParser parser;
 
         auto parsed = parser.parse(command);
+
+        /*
+         * Read-consistency rules will be
+         * completed on Day 4.
+         *
+         * Do not expose potentially stale
+         * Raft state through GET yet.
+         */
+        if (
+            role_ == NodeRole::RAFT &&
+            parsed.type ==
+                forgedb::commands::CommandType::GET
+        ) {
+            return ClientResponse{
+                client_fd,
+                0,
+                "ERR Raft reads not enabled yet\n"
+            };
+        }
 
         std::string response =
             commandHandler_.execute(parsed);
@@ -1640,6 +1719,16 @@ namespace forgedb::network {
                     << new_commit
                     << "\n";
             }
+            /*
+             * Apply all committed entries not yet
+             * reflected in the KeyValueStore.
+             *
+             * The application mutex guarantees
+             * that parallel calls remain ordered.
+             *
+             * On failure, the node terminates.
+             */
+            applyCommittedOrTerminate();
 
             if (
                 !request->entries.empty()
