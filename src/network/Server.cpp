@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <limits>
 #include <exception>
+#include <chrono>
+#include <optional>
 
 namespace {
 
@@ -73,6 +75,10 @@ namespace forgedb::network {
           ),
           raft_log_(
               "raft.log"
+          ),
+          raft_proposer_(
+              raft_state_,
+              raft_log_
           ),
           raft_peers_(raft_peers),
           raft_leader_progress_(raft_peers_),
@@ -580,11 +586,180 @@ namespace forgedb::network {
             role_ == NodeRole::RAFT &&
             isMutationCommand(command)
         ) {
+            /*
+             * Step 15A:
+             * Validate mutation syntax and
+             * require an actual Raft leader.
+             */
+            std::istringstream stream(command);
+
+            std::string operation;
+            std::string key;
+            std::string value;
+            std::string extra;
+
+            stream >> operation;
+
+            bool valid = false;
+
+            if (operation == "SET") {
+                valid =
+                    static_cast<bool>(
+                        stream >> key >> value
+                    ) &&
+                    !(stream >> extra);
+            }
+            else if (operation == "DELETE") {
+                valid =
+                    static_cast<bool>(
+                        stream >> key
+                    ) &&
+                    !(stream >> extra);
+            }
+
+            if (!valid) {
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    "ERR invalid Raft mutation\n"
+                };
+            }
+
+            /*
+             * Only the elected Raft leader
+             * may eventually accept proposals.
+             */
+            if (
+                raft_state_.role() !=
+                forgedb::raft::RaftRole::LEADER
+            ) {
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    "ERR not Raft leader\n"
+                };
+            }
+            std::optional<forgedb::raft::RaftLogEntry> proposal;
+
+            try {
+                /*
+                 * Coordinate local proposals with
+                 * incoming AppendEntries processing.
+                 * Do not hold this lock while waiting
+                 * for a majority.
+                 */
+                std::lock_guard<std::mutex> lock(raft_append_mutex_);
+
+                const uint64_t index =
+                    raft_proposer_.propose(command);
+
+                proposal = raft_log_.entryAt(index);
+            }
+            catch (const std::exception& e) {
+                std::cerr
+                    << "Raft proposal failed: "
+                    << e.what() << "\n";
+
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    "ERR Raft proposal failed; outcome uncertain\n"
+                };
+            }
+
+            if (!proposal.has_value()) {
+                return ClientResponse{
+                    client_fd,
+                    0,
+                    "ERR Raft proposal missing; outcome uncertain\n"
+                };
+            }
+
+            /*
+             * Bounded wait prevents unavailable
+             * quorum from blocking indefinitely.
+             */
+            const auto deadline =
+                std::chrono::steady_clock::now() +
+                std::chrono::seconds(3);
+
+            while (std::chrono::steady_clock::now() < deadline) {
+
+                /*
+                 * The proposing leader must still
+                 * be leader in the same term.
+                 */
+                if (
+                    raft_state_.role() !=
+                        forgedb::raft::RaftRole::LEADER ||
+                    raft_state_.currentTerm() != proposal->term
+                ) {
+                    return ClientResponse{
+                        client_fd,
+                        0,
+                        "ERR Raft leadership changed; outcome uncertain\n"
+                    };
+                }
+
+                const uint64_t committed =
+                    raft_commit_state_.commitIndex();
+
+                const uint64_t applied =
+                    raft_apply_progress_.lastApplied();
+
+                if (
+                    committed >= proposal->index &&
+                    applied >= proposal->index
+                ) {
+                    /*
+                     * Confirm the same log entry
+                     * occupies the original index.
+                     */
+                    auto actual =
+                        raft_log_.entryAt(proposal->index);
+
+                    if (
+                        !actual.has_value() ||
+                        actual->term != proposal->term ||
+                        actual->command != proposal->command
+                    ) {
+                        return ClientResponse{
+                            client_fd,
+                            0,
+                            "ERR Raft proposal changed; outcome uncertain\n"
+                        };
+                    }
+
+                    if (
+                        raft_state_.role() !=
+                            forgedb::raft::RaftRole::LEADER ||
+                        raft_state_.currentTerm() != proposal->term
+                    ) {
+                        return ClientResponse{
+                            client_fd,
+                            0,
+                            "ERR Raft leadership changed; outcome uncertain\n"
+                        };
+                    }
+
+                    return ClientResponse{
+                        client_fd,
+                        0,
+                        "OK\n"
+                    };
+                }
+
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(20)
+                );
+            }
+
             return ClientResponse{
                 client_fd,
                 0,
-                "ERR Raft writes not enabled yet\n"
+                "ERR Raft commit timeout; outcome uncertain\n"
             };
+
         }
         if (
             command == "RAFT_APPEND" ||
