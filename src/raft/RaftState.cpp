@@ -5,6 +5,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <unistd.h>
+#include "raft/RaftLog.h"
 
 namespace forgedb::raft {
 
@@ -49,6 +50,17 @@ RaftRole RaftState::role() const
     );
 
     return role_;
+}
+bool RaftState::isLeaderInTerm(
+    uint64_t expected_term
+) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    return
+        expected_term != 0 &&
+        role_ == RaftRole::LEADER &&
+        current_term_ == expected_term;
 }
 
 void RaftState::setRole(
@@ -354,10 +366,38 @@ RequestVoteResponse RaftState::handleRequestVote(
     uint64_t local_last_log_term
 )
 {
-    std::lock_guard<std::mutex> lock(
-        mutex_
-    );
+    std::lock_guard<std::mutex> lock(mutex_);
 
+    return handleRequestVoteLocked(
+        request,
+        local_last_log_index,
+        local_last_log_term
+    );
+}
+
+RequestVoteResponse RaftState::handleRequestVoteWithLog(
+    const RequestVoteRequest& request,
+    const RaftLog& log
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Log snapshot and voting decision occur
+    // under the same RaftState lock.
+    const auto [index, term] = log.lastLogInfo();
+
+    return handleRequestVoteLocked(
+        request,
+        index,
+        term
+    );
+}
+RequestVoteResponse RaftState::handleRequestVoteLocked(
+    const RequestVoteRequest& request,
+    uint64_t local_last_log_index,
+    uint64_t local_last_log_term
+)
+{
     // Reject invalid voting requests.
     if (
         request.term == 0 ||
@@ -487,4 +527,86 @@ uint64_t RaftState::startElection()
 
     return current_term_;
 }
+
+uint64_t RaftState::appendCommandIfLeader(
+    RaftLog& log,
+    const std::string& command
+)
+{
+    /*
+     * This same mutex protects every
+     * Raft leadership/term transition.
+     *
+     * Holding it through append prevents
+     * a leadership change between checking
+     * authority and persisting the entry.
+     */
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (role_ != RaftRole::LEADER) {
+        throw std::runtime_error(
+            "Not Raft leader"
+        );
+    }
+
+    if (current_term_ == 0) {
+        throw std::runtime_error(
+            "Cannot propose in Raft term zero"
+        );
+    }
+
+    /*
+     * RaftState mutex -> RaftLog mutex.
+     *
+     * Keep this lock ordering consistent.
+     * The Raft log append must complete
+     * before releasing the state mutex.
+     */
+    auto entry = log.append(
+        current_term_,
+        command
+    );
+
+    return entry.index;
+}
+
+bool RaftState::becomeLeaderWithNoopIfCandidate(
+    uint64_t expected_term,
+    RaftLog& log
+)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    /*
+     * The election may have become stale
+     * while we were collecting votes.
+     */
+    if (
+        expected_term != current_term_ ||
+        role_ != RaftRole::CANDIDATE
+    ) {
+        return false;
+    }
+
+    /*
+     * Append a current-term entry BEFORE
+     * making leadership visible.
+     *
+     * append() durably persists the entry.
+     * It does not commit it.
+     */
+    log.append(
+        current_term_,
+        "RAFT_NOOP"
+    );
+
+    /*
+     * Only after the append succeeds can
+     * this node accept leader proposals.
+     */
+    role_ = RaftRole::LEADER;
+
+    return true;
+}
+
 }

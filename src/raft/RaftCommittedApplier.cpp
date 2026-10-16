@@ -67,7 +67,19 @@ RaftCommittedApplier::applyCommitted()
                 "Committed Raft log entry missing"
             );
         }
-
+        /*
+         * Internal Raft no-op entry.
+         *
+         * It changes no application data, but
+         * still advances the durable applied index.
+         *
+         * Only the exact reserved command is valid.
+         */
+        if (entry->command == "RAFT_NOOP") {
+            progress_.recordApplied(next_index);
+            ++applied_count;
+            continue;
+        }
         auto command =
             parser.parse(entry->command);
 

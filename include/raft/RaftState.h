@@ -6,6 +6,8 @@
 
 namespace forgedb::raft {
 
+class RaftLog;
+
 enum class RaftRole {
     FOLLOWER,
     CANDIDATE,
@@ -26,6 +28,9 @@ public:
     std::string votedFor() const;
 
     RaftRole role() const;
+    bool isLeaderInTerm(
+        uint64_t expected_term
+    ) const;
     uint64_t startElection();
 
     bool observeLeader(
@@ -48,7 +53,18 @@ public:
         uint64_t local_last_log_index,
         uint64_t local_last_log_term
     );
-
+    uint64_t appendCommandIfLeader(
+        RaftLog& log,
+        const std::string& command
+    );
+    bool becomeLeaderWithNoopIfCandidate(
+        uint64_t expected_term,
+        RaftLog& log
+    );
+    RequestVoteResponse handleRequestVoteWithLog(
+        const RequestVoteRequest& request,
+        const RaftLog& log
+    );
 private:
     void load();
 
@@ -65,6 +81,12 @@ private:
         RaftRole::FOLLOWER;
 
     mutable std::mutex mutex_;
+
+    RequestVoteResponse handleRequestVoteLocked(
+        const RequestVoteRequest& request,
+        uint64_t local_last_log_index,
+        uint64_t local_last_log_term
+    );
 };
 
 }

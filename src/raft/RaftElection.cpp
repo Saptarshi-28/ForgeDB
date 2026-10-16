@@ -103,15 +103,17 @@ RaftElection::runElection()
      */
     if (votes >= majority) {
 
-        state_.setRole(
-            RaftRole::LEADER
-        );
+        const bool won =
+            state_.becomeLeaderWithNoopIfCandidate(
+                election_term,
+                log_
+            );
 
         return {
             election_term,
             votes,
             cluster_size,
-            true
+            won
         };
     }
 
@@ -242,22 +244,25 @@ RaftElection::runElection()
          * are STILL candidate in the
          * same election term.
          */
-        if (
-            votes >= majority &&
-            state_.currentTerm() ==
-                election_term &&
-            state_.role() ==
-                RaftRole::CANDIDATE
-        ) {
+        if (votes >= majority) {
 
-            state_.setRole(
-                RaftRole::LEADER
-            );
+            if (
+                !state_.becomeLeaderWithNoopIfCandidate(
+                    election_term,
+                    log_
+                )
+            ) {
+                return {
+                    state_.currentTerm(),
+                    votes,
+                    cluster_size,
+                    false
+                };
+            }
 
             std::cout
                 << node_id_
-                << " won election "
-                << "for term "
+                << " won election for term "
                 << election_term
                 << "\n";
 

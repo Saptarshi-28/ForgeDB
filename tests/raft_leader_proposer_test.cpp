@@ -133,6 +133,61 @@ int main()
             << "Durable proposal recovery passed\n";
     }
 
+    {
+        const auto fence_log =
+            (dir / "fence.log").string();
+
+        const auto fence_meta =
+            (dir / "fence.meta").string();
+
+        RaftState state("node1", fence_meta);
+        RaftLog log(fence_log);
+
+        state.updateTerm(7);
+        state.setRole(RaftRole::LEADER);
+
+        RaftLeaderProposer proposer(state, log);
+
+        // A legitimate leader can propose.
+        assert(proposer.propose("SET before yes") == 1);
+
+        // A newer leader is observed.
+        assert(state.observeLeader(8));
+
+        assert(state.currentTerm() == 8);
+        assert(state.role() == RaftRole::FOLLOWER);
+
+        // The old leader must no longer propose.
+        bool rejected = false;
+
+        try {
+            proposer.propose("SET stale no");
+        }
+        catch (const std::runtime_error&) {
+            rejected = true;
+        }
+
+        assert(rejected);
+        assert(log.lastLogInfo().first == 1);
+
+        // Simulate this node being elected again.
+        state.setRole(RaftRole::LEADER);
+
+        assert(proposer.propose("SET fresh yes") == 2);
+
+        auto entry = log.entryAt(2);
+
+        assert(entry.has_value());
+        assert(entry->term == 8);
+        assert(entry->command == "SET fresh yes");
+
+        // Appending still does not commit.
+        assert(log.protectedIndex() == 0);
+
+        std::cout
+            << "Leadership fencing regression passed\n";
+    }
+
     std::cout
         << "All Raft leader-proposer tests passed\n";
 

@@ -690,9 +690,9 @@ namespace forgedb::network {
                  * be leader in the same term.
                  */
                 if (
-                    raft_state_.role() !=
-                        forgedb::raft::RaftRole::LEADER ||
-                    raft_state_.currentTerm() != proposal->term
+                    !raft_state_.isLeaderInTerm(
+                        proposal->term
+                    )
                 ) {
                     return ClientResponse{
                         client_fd,
@@ -731,9 +731,9 @@ namespace forgedb::network {
                     }
 
                     if (
-                        raft_state_.role() !=
-                            forgedb::raft::RaftRole::LEADER ||
-                        raft_state_.currentTerm() != proposal->term
+                        !raft_state_.isLeaderInTerm(
+                            proposal->term
+                        )
                     ) {
                         return ClientResponse{
                             client_fd,
@@ -850,12 +850,9 @@ namespace forgedb::network {
                 "ERR invalid Raft vote request\n"
             };
         }
-
-        auto [
-            local_last_log_index,
-            local_last_log_term
-        ] =
-            raft_log_.lastLogInfo();
+        std::lock_guard<std::mutex> append_lock(
+            raft_append_mutex_
+        );
 
         forgedb::raft::
             RequestVoteResponse response;
@@ -863,10 +860,9 @@ namespace forgedb::network {
         try {
 
             response =
-                raft_state_.handleRequestVote(
+                raft_state_.handleRequestVoteWithLog(
                     *request,
-                    local_last_log_index,
-                    local_last_log_term
+                    raft_log_
                 );
             if (
                 response.vote_granted
@@ -1922,14 +1918,6 @@ namespace forgedb::network {
                     << "\n";
             }
 
-            /*
-             * leader_commit is intentionally
-             * not processed yet.
-             *
-             * At this stage we persist log
-             * entries but do NOT apply them
-             * to KeyValueStore.
-             */
             return ClientResponse{
                 client_fd,
                 0,

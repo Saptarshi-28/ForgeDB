@@ -54,47 +54,14 @@ uint64_t RaftLeaderProposer::propose(
     }
 
     /*
-     * Only an elected leader may propose.
+     * Leadership validation and durable append
+     * are now atomic with respect to RaftState
+     * leadership transitions.
      */
-    if (state_.role() != RaftRole::LEADER) {
-        throw std::runtime_error(
-            "Not Raft leader"
-        );
-    }
-
-    const uint64_t term = state_.currentTerm();
-
-    if (term == 0) {
-        throw std::runtime_error(
-            "Cannot propose in Raft term zero"
-        );
-    }
-
-    /*
-     * RaftLog::append() provides durable
-     * log persistence before returning.
-     *
-     * It does NOT mean majority committed.
-     */
-    auto entry = log_.append(term, command);
-
-    /*
-     * Detect leadership changes that occurred
-     * while the append was in progress.
-     *
-     * A failed check here means the entry
-     * might still exist in the local log.
-     */
-    if (
-        state_.role() != RaftRole::LEADER ||
-        state_.currentTerm() != term
-    ) {
-        throw std::runtime_error(
-            "Leadership changed; proposal outcome uncertain"
-        );
-    }
-
-    return entry.index;
+    return state_.appendCommandIfLeader(
+        log_,
+        command
+    );
 }
 
 }
